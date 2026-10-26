@@ -1,8 +1,8 @@
 /**
- * tests/parity/checklist.ts — 视图 A 的四份 parity 清单（内容 / 操作 / 五态）
+ * tests/parity/checklist.ts — 视图 A / B 的 parity 清单（内容 / 操作 / 五态）
  *
  * 职责:
- * - 单一源声明 memory / persona / rules / import 四视图该有什么内容、能做哪些操作、覆盖哪些状态
+ * - 单一源声明 memory / persona / rules / import / debug 五视图该有什么内容、能做哪些操作、覆盖哪些状态
  * - 每条声明绑定覆盖它的测试文件与用例名，供 checklist.test.ts 机器校验引用不漂移
  *
  * 设计特点:
@@ -12,7 +12,7 @@
  */
 
 /** 参与 parity 的视图标识 */
-export type ParityViewId = 'memory' | 'persona' | 'rules' | 'import'
+export type ParityViewId = 'memory' | 'persona' | 'rules' | 'import' | 'debug'
 
 /** 清单维度 */
 export type ParityDimension = 'content' | 'operation' | 'state'
@@ -912,5 +912,147 @@ const IMPORT: ParityViewChecklist = {
   ],
 }
 
-/** 视图 A 的四份 parity 清单 */
-export const PARITY_CHECKLIST: ParityViewChecklist[] = [MEMORY, PERSONA, RULES, IMPORT]
+const DEBUG: ParityViewChecklist = {
+  view: 'debug',
+  qaId: 'QA-V-debug',
+  entries: [
+    {
+      id: 'debug-content-1',
+      dimension: 'content',
+      claim: '关键词池给出规范词 / 已确认别名 / 待确认别名三个计数与按状态分组的全量词条',
+      status: 'covered',
+      coverage: {
+        file: 'debugView.test.ts',
+        cases: ['默认进入关键词池，展示三态计数与待确认别名'],
+      },
+    },
+    {
+      id: 'debug-content-2',
+      dimension: 'content',
+      claim: '待确认别名行展示「别名 → 建议规范词」，并给两个裁决动作',
+      status: 'covered',
+      coverage: {
+        file: 'debugView.test.ts',
+        cases: ['默认进入关键词池，展示三态计数与待确认别名', '确认合并后调用裁决命令并重新取数'],
+      },
+    },
+    {
+      id: 'debug-content-3',
+      dimension: 'content',
+      claim: '说话风格展示样本量、统计状态、规则来源、自动规则文本与五维统计参数',
+      status: 'covered',
+      coverage: {
+        file: 'debugView.test.ts',
+        cases: ['说话风格按人格取数并渲染五维与规则文本'],
+      },
+    },
+    {
+      id: 'debug-content-4',
+      dimension: 'content',
+      claim: '评估产物展示已选目录、文件大小与修改时间，以及单文件的档位得分与辅助指标',
+      status: 'covered',
+      coverage: {
+        file: 'debugView.test.ts',
+        cases: ['选择目录后列出产物并打开摘要'],
+      },
+    },
+    {
+      id: 'debug-operation-1',
+      dimension: 'operation',
+      claim: '裁决待确认别名：确认合并 / 驳回为规范词，处理后重新取数',
+      status: 'covered',
+      coverage: {
+        file: 'debugView.test.ts',
+        cases: ['确认合并后调用裁决命令并重新取数'],
+      },
+    },
+    {
+      id: 'debug-operation-2',
+      dimension: 'operation',
+      claim: '说话风格按人格下拉切换并重新取数',
+      status: 'covered',
+      coverage: {
+        file: 'debugView.test.ts',
+        cases: ['切换人格后按该人格重新取统计'],
+      },
+    },
+    {
+      id: 'debug-operation-3',
+      dimension: 'operation',
+      claim: '评估产物：选择目录、打开文件查看摘要、返回文件列表',
+      status: 'covered',
+      coverage: {
+        file: 'debugView.test.ts',
+        cases: ['选择目录后列出产物并打开摘要'],
+      },
+    },
+    {
+      id: 'debug-operation-4',
+      dimension: 'operation',
+      claim: '折叠组可展开 / 收起，展开后显示该状态的全部词条',
+      status: 'covered',
+      coverage: {
+        file: 'debugView.test.ts',
+        cases: ['折叠组展开后显示该状态的词条'],
+      },
+    },
+    {
+      id: 'debug-state-default',
+      dimension: 'state',
+      cell: '默认',
+      claim: '页签有内容：计数、词条与动作可用',
+      status: 'covered',
+      coverage: {
+        file: 'debugView.test.ts',
+        cases: ['默认进入关键词池，展示三态计数与待确认别名'],
+      },
+    },
+    {
+      id: 'debug-state-loading',
+      dimension: 'state',
+      cell: '加载',
+      claim: '主请求在途：骨架占位 + 忙碌标记，切换页签不受阻',
+      status: 'covered',
+      coverage: {
+        file: 'debugView.test.ts',
+        cases: ['请求在途时进入加载态并给出骨架'],
+      },
+    },
+    {
+      id: 'debug-state-empty',
+      dimension: 'state',
+      cell: '空',
+      claim: '无统计记录或无产物目录：按页签归因，给对应主操作',
+      status: 'covered',
+      coverage: {
+        file: 'debugView.test.ts',
+        cases: ['无统计记录时说话风格为空态', '深链直接进入评估产物页签'],
+      },
+    },
+    {
+      id: 'debug-state-error',
+      dimension: 'state',
+      cell: '错误',
+      claim: '主请求失败：错误块写清原因并可重试',
+      status: 'covered',
+      coverage: {
+        file: 'debugView.test.ts',
+        cases: ['关键词池读取失败显示错误块并可重试'],
+      },
+    },
+    {
+      id: 'debug-state-degraded',
+      dimension: 'state',
+      cell: '降级·dir',
+      claim: '评估目录不可读：视图内降级条 + 重新选择，不替换内容也不影响其余页签',
+      status: 'covered',
+      coverage: {
+        file: 'debugView.test.ts',
+        cases: ['评估目录不可读时显示降级条并清空列表'],
+      },
+    },
+  ],
+}
+
+/** 视图 A / B 的五份 parity 清单 */
+export const PARITY_CHECKLIST: ParityViewChecklist[] = [MEMORY, PERSONA, RULES, IMPORT, DEBUG]

@@ -14,6 +14,7 @@
 import { invoke } from '../transport'
 import { COMMANDS } from './commands'
 import type {
+  AliasResolveResult,
   AppStateValue,
   BackendConfig,
   BehaviorRuleView,
@@ -25,6 +26,7 @@ import type {
   DiagnosticsExport,
   EmbeddingModelView,
   EmbeddingValidation,
+  EvalFileList,
   FactList,
   ImportAnalysisReport,
   ImportPipelineReceipt,
@@ -32,9 +34,11 @@ import type {
   ImportStatusView,
   IndexRebuildReceipt,
   IndexStatusView,
+  KeywordPool,
   McpInfo,
   MemoryEvent,
   MemoryL1,
+  PendingAliasList,
   PersonaExportReceipt,
   PersonaFull,
   PersonaPromptPreview,
@@ -54,6 +58,7 @@ import type {
   SessionDetail,
   SessionSummary,
   SettingItem,
+  StyleStats,
   TraitEvidenceChain,
   UpdateStatus,
   VisionSupportReceipt,
@@ -451,5 +456,43 @@ export const diagnosticsApi = {
   },
   exportDiagnostics() {
     return invoke<DiagnosticsExport>(COMMANDS.diagnostics.exportDiagnostics)
+  },
+}
+
+/** 关键词池：三态词条、待确认别名与别名裁决 */
+export const keywordsApi = {
+  /** 全量词条 + 三态计数（按使用次数降序） */
+  list() {
+    return invoke<KeywordPool>(COMMANDS.keywords.list)
+  },
+  /** 待确认别名（列表前由后端 best-effort 生成建议） */
+  pendingAliases() {
+    return invoke<PendingAliasList>(COMMANDS.keywords.pendingAliases)
+  },
+  /** 裁决待确认别名；`action` 为 confirm（合并）或 reject（晋升规范词） */
+  resolveAlias(alias: string, action: 'confirm' | 'reject') {
+    return invoke<AliasResolveResult>(COMMANDS.keywords.resolveAlias, { alias, action })
+  },
+}
+
+/** 说话风格：按人格读取统计（只读） */
+export const styleApi = {
+  getStats(personaUid: string) {
+    return invoke<StyleStats | null>(COMMANDS.style.getStats, { personaUid })
+  },
+}
+
+/** 评估产物：目录选择、产物列表与单文件解析（只读） */
+export const evaluationApi = {
+  /** 目录选择即授权（本次会话有效）；取消为 `null` */
+  pickDir() {
+    return invoke<string | null>(COMMANDS.evaluation.pickDir)
+  },
+  listFiles(dir: string) {
+    return invoke<EvalFileList>(COMMANDS.evaluation.listFiles, { dir })
+  },
+  /** 产物 JSON 原样返回，结构由调用方宽松解析 */
+  readResult(path: string) {
+    return invoke<unknown>(COMMANDS.evaluation.readResult, { path })
   },
 }

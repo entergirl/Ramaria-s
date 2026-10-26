@@ -15,6 +15,7 @@
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router'
 
 import { useAppStore } from '../stores/app'
+import { useDebugStore } from '../stores/debug'
 
 /** 全屏页路由名：这些页面不渲染导航框架，且在就绪后不得停留 */
 export const FULLSCREEN_ROUTES = new Set(['setup', 'error'])
@@ -32,7 +33,7 @@ export const routes: RouteRecordRaw[] = [
     name: 'settings',
     component: () => import('../views/settings/index.vue'),
   },
-  { path: '/debug', name: 'debug', component: () => import('../views/debug/index.vue') },
+  { path: '/debug/:tab?', name: 'debug', component: () => import('../views/debug/index.vue') },
   { path: '/setup', name: 'setup', component: () => import('../views/setup/index.vue') },
   { path: '/error', name: 'error', component: () => import('../views/error/index.vue') },
   { path: '/:pathMatch(.*)*', name: 'not-found', redirect: { name: 'chat' } },
@@ -95,6 +96,10 @@ export function createAppRouter() {
       return target === 'error' ? true : { name: 'error' }
     }
     if (FULLSCREEN_ROUTES.has(target)) {
+      return { name: 'chat' }
+    }
+    // 调试未解锁时直达路由也收敛回对话：入口不渲染，直达同样不留空页
+    if (target === 'debug' && !useDebugStore().unlocked) {
       return { name: 'chat' }
     }
     return true

@@ -162,6 +162,36 @@ const COPY: Record<string, StateCopy> = {
     description: '规则自动抽取暂停，编辑与启停仍可用。',
   },
 
+  // ---- debug ----
+  'debug.empty.keywords': {
+    title: '关键词池为空',
+    description: '词条随对话与记忆管线自然累积，也可用 CLI 注入种子词。',
+  },
+  'debug.empty.style': {
+    title: '还没有风格统计',
+    description: '风格统计在会话封存时生成，样本不足时只有参数没有规则。',
+  },
+  'debug.empty.no-data': {
+    title: '还没有调试产物',
+    description: '选择评估输出目录后查看产物列表与档位得分。',
+    action: '选择目录',
+  },
+  'debug.empty.eval-dir': {
+    title: '目录里没有产物',
+    description: '该目录下没有 .json 文件，换一个目录或先用 CLI 生成评估结果。',
+    action: '重新选择',
+  },
+  'debug.error.load': {
+    title: '调试数据读取失败',
+    description: '读取本地数据库或产物目录时出错，其余页签不受影响。',
+    action: '重试',
+  },
+  'debug.degraded.dir': {
+    title: '评估目录不可读',
+    description: '目录已移动或授权已失效，关键词池与说话风格不受影响。',
+    action: '重新选择',
+  },
+
   // ---- 全局降级 ----
   'global.degraded.embedding_missing': {
     title: '嵌入模型不可用',

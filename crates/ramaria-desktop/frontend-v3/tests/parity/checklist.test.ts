@@ -75,12 +75,13 @@ function caseNamesOf(file: string): string[] {
 }
 
 describe('parity 清单结构', () => {
-  it('四视图齐全且顺序固定', () => {
+  it('五视图齐全且顺序固定', () => {
     expect(PARITY_CHECKLIST.map((item) => item.view)).toEqual([
       'memory',
       'persona',
       'rules',
       'import',
+      'debug',
     ])
   })
 
@@ -145,11 +146,11 @@ describe('parity 清单与设计 QA 对齐', () => {
     })
   }
 
-  it('四个视图的状态格合计与文档一致', () => {
+  it('五个视图的状态格合计与文档一致', () => {
     const total = PARITY_CHECKLIST.reduce(
       (sum, view) => sum + view.entries.filter((entry) => entry.dimension === 'state').length,
       0,
     )
-    expect(total).toBe(29)
+    expect(total).toBe(34)
   })
 })

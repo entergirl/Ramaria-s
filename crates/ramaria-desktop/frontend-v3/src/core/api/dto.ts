@@ -901,3 +901,92 @@ export interface DiagnosticsExport {
   collectionStatus: Record<string, string>
   warnings: string[]
 }
+
+/**
+ * 单条关键词词条（`list_keywords` 的 `keywords` 条目）
+ *
+ * 形状: snake_case，6 字段；`status` 为 canonical / alias / pending，
+ * 规范词自身的 `canonical_id` 与 `canonical_keyword` 为 `null`
+ */
+export interface KeywordEntry {
+  keyword: string
+  use_count: number
+  status: string
+  canonical_id: number | null
+  canonical_keyword: string | null
+  created_at: number
+}
+
+/**
+ * 关键词池（`list_keywords`）
+ *
+ * 形状: snake_case；`keywords` 为全量词条（按使用次数降序），三态计数另行给出
+ */
+export interface KeywordPool {
+  total: number
+  canonical_count: number
+  alias_count: number
+  pending_count: number
+  keywords: KeywordEntry[]
+}
+
+/** 待确认别名（`list_pending_aliases` 的 `aliases` 条目）：snake_case */
+export interface PendingAlias {
+  alias_id: number
+  alias_keyword: string
+  canonical_keyword: string
+  created_at: number
+}
+
+/** 待确认别名列表（`list_pending_aliases`）：snake_case */
+export interface PendingAliasList {
+  total: number
+  aliases: PendingAlias[]
+}
+
+/**
+ * 别名裁决结果（`resolve_alias`）
+ *
+ * 形状: snake_case；`status` 为处理后的词条状态（alias / canonical），
+ * `already_applied` 为真表示此前已合并、本次未写库
+ */
+export interface AliasResolveResult {
+  alias: string
+  canonical_keyword: string | null
+  status: string
+  already_applied: boolean
+}
+
+/**
+ * 说话风格统计（`get_style_stats`；无记录时为 `null`）
+ *
+ * 形状: snake_case，10 字段；`stats_json` 为五维统计参数原始文本，
+ * 状态与规则来源的中文标签由后端随视图给出
+ */
+export interface StyleStats {
+  persona_uid: string
+  sample_count: number
+  baseline_version: number
+  status: string
+  status_label: string
+  rule_source: string
+  rule_source_label: string
+  rule_text: string | null
+  stats_json: string
+  updated_at: number
+}
+
+/** 评估产物文件（`list_eval_files` 的 `files` 条目）：snake_case */
+export interface EvalFile {
+  name: string
+  path: string
+  size: number
+  modified_at: number | null
+}
+
+/** 评估产物文件列表（`list_eval_files`）：snake_case，按修改时间倒序 */
+export interface EvalFileList {
+  dir: string
+  total: number
+  files: EvalFile[]
+}
