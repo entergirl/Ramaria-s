@@ -300,3 +300,55 @@ pub async fn update_full_config(
         failures: result.failures,
     })
 }
+
+// =========================================================
+// get_default_config — 出厂默认配置
+// =========================================================
+
+/// 读取出厂默认配置（完整 `RamariaConfig` 的 JSON 文本）。
+///
+/// 返回:
+/// - JSON 文本：与 `get_full_config` 同结构，供设置页按组取「恢复默认」值；
+/// - `version` / `schema_version` / `paths` 属非界面项，调用方忽略。
+///
+/// 说明:
+/// - 只读取 Rust 侧 `Default` 实现，不读文件 / 数据库，无写副作用；
+/// - 配置结构本身不含 API key，返回值可直接进界面态。
+#[tauri::command]
+pub async fn get_default_config() -> Result<String, String> {
+    let config = ramaria_core::config::RamariaConfig::default();
+    serde_json::to_string(&config).map_err(|e| format!("序列化默认配置失败: {}", e))
+}
+
+// =========================================================
+// 测试
+// =========================================================
+
+#[cfg(test)]
+mod tests {
+    /// 默认配置序列化：覆盖嵌套组，且不含密钥字段。
+    #[test]
+    fn default_config_json_covers_nested_groups() {
+        let config = ramaria_core::config::RamariaConfig::default();
+        let json = serde_json::to_string(&config).expect("默认配置应可序列化");
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("序列化结果应为合法 JSON");
+
+        assert!(value.get("proactive").is_some(), "应含 [proactive] 组");
+        assert!(
+            value
+                .get("l1")
+                .and_then(|group| group.get("progressive"))
+                .is_some(),
+            "应含 [l1.progressive] 嵌套组"
+        );
+        assert!(
+            value
+                .get("inference")
+                .and_then(|group| group.get("upgrade"))
+                .is_some(),
+            "应含 [inference.upgrade] 嵌套组"
+        );
+        assert!(!json.contains("api_key"), "默认配置不应含密钥字段");
+    }
+}

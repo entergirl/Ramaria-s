@@ -27,7 +27,11 @@ export const routes: RouteRecordRaw[] = [
   { path: '/persona', name: 'persona', component: () => import('../views/persona/index.vue') },
   { path: '/rules', name: 'rules', component: () => import('../views/rules/index.vue') },
   { path: '/import', name: 'import', component: () => import('../views/import/index.vue') },
-  { path: '/settings', name: 'settings', component: () => import('../views/settings/index.vue') },
+  {
+    path: '/settings/:scope?/:section?',
+    name: 'settings',
+    component: () => import('../views/settings/index.vue'),
+  },
   { path: '/debug', name: 'debug', component: () => import('../views/debug/index.vue') },
   { path: '/setup', name: 'setup', component: () => import('../views/setup/index.vue') },
   { path: '/error', name: 'error', component: () => import('../views/error/index.vue') },

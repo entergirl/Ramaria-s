@@ -134,6 +134,18 @@ const COPY: Record<string, StateCopy> = {
     description: '导入进行中，参数与步骤暂不可改。',
   },
 
+  // ---- settings ----
+  'settings.error.load': {
+    title: '设置加载失败',
+    description: '读取本地配置时出错，其余功能不受影响；可重试或稍后再进。',
+    action: '重试',
+  },
+  'settings.empty.roster': {
+    title: '还没有可配置的人格',
+    description: '创建或导入人格后，可在这里设置主动消息开关。',
+    action: '去人格',
+  },
+
   // ---- rules ----
   'rules.empty.no-data': {
     title: '还没有规则',

@@ -258,6 +258,8 @@
   --radius-btn-sm: 8px;
   --radius-check: 4px;
   --radius-full: 50%;
+  /* 胶囊形态：导航分段与页签条专用，不参与卡片 / 控件的比例分档 */
+  --radius-pill: 100px;
 }
 
 /* ═══ 7. 按钮 ═══

@@ -191,6 +191,7 @@ pub fn run() {
             commands::config::update_setting,
             commands::config::get_full_config,
             commands::config::update_full_config,
+            commands::config::get_default_config,
             // ---- MCP 接入（设置页面板）----
             commands::mcp::get_mcp_info,
             // ---- Export ----
@@ -220,6 +221,7 @@ pub fn run() {
             // ---- Proactive（主动消息名单）----
             commands::proactive_cmd::list_proactive_personas,
             commands::proactive_cmd::set_proactive_persona,
+            commands::proactive_cmd::get_proactive_stats,
             // ---- Channel（社交平台接入）----
             commands::channel::get_channel_status,
             commands::channel::start_channel,

@@ -56,6 +56,7 @@ export const COMMANDS = {
     updateSetting: 'update_setting',
     getFull: 'get_full_config',
     updateFull: 'update_full_config',
+    getDefaults: 'get_default_config',
   },
   mcp: {
     getInfo: 'get_mcp_info',
@@ -88,6 +89,7 @@ export const COMMANDS = {
   proactive: {
     listPersonas: 'list_proactive_personas',
     setPersona: 'set_proactive_persona',
+    getStats: 'get_proactive_stats',
   },
   channel: {
     getStatus: 'get_channel_status',

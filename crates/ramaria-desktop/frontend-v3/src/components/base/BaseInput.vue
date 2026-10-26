@@ -25,6 +25,10 @@ const props = withDefaults(
     validating?: boolean
     disabled?: boolean
     id?: string
+    /** 数值输入的上下界与步长（仅 type=number 生效） */
+    min?: number
+    max?: number
+    step?: number
   }>(),
   {
     type: 'text',
@@ -35,6 +39,9 @@ const props = withDefaults(
     validating: false,
     disabled: false,
     id: undefined,
+    min: undefined,
+    max: undefined,
+    step: undefined,
   },
 )
 
@@ -62,6 +69,9 @@ function onInput(event: Event): void {
         :value="modelValue"
         :placeholder="placeholder"
         :disabled="disabled"
+        :min="min"
+        :max="max"
+        :step="step"
         :aria-invalid="invalid || error ? 'true' : undefined"
         :aria-describedby="error || hint ? messageId : undefined"
         @input="onInput"

@@ -763,3 +763,141 @@ export interface RuleEnabledReceipt {
   id: number
   enabled: boolean
 }
+
+/**
+ * MCP 接入信息（`get_mcp_info`）
+ *
+ * 形状: camelCase；`lastActivityMs` 为 mcp 通道最近消息时间，无活动为 null
+ */
+export interface McpInfo {
+  enabled: boolean
+  dbPath: string
+  configPath: string
+  command: string
+  commandIsBundled: boolean
+  activeSessions: number
+  lastActivityMs: number | null
+}
+
+/**
+ * 单通道运行状态（`get_channel_status` 的 `channels[]` 与 `channel-status` 事件共用）
+ *
+ * 形状: camelCase；`state` 为 disconnected / connecting / online / error
+ */
+export interface ChannelStatus {
+  channel: string
+  state: string
+  lastError: string | null
+  updatedAt: number
+}
+
+/**
+ * 通道面板视图（`get_channel_status` / `start_channel` / `stop_channel`）
+ *
+ * 形状: camelCase；凭据只回显「是否已配置」，不含明文
+ */
+export interface ChannelPanel {
+  enabled: boolean
+  qqEnabled: boolean
+  telegramEnabled: boolean
+  qqWsUrl: string
+  defaultPersonaUid: string
+  proactiveDeliveryEnabled: boolean
+  qqTokenConfigured: boolean
+  telegramTokenConfigured: boolean
+  running: boolean
+  channels: ChannelStatus[]
+}
+
+/**
+ * 通道绑定（`list_channel_bindings` / `set_channel_binding`）
+ *
+ * 形状: camelCase；`personaUid` 为绑定级覆盖（null = 未覆盖）
+ */
+export interface ChannelBinding {
+  channel: string
+  externalRef: string
+  personaUid: string | null
+  effectivePersonaUid: string
+  enabled: boolean
+  allowProactive: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+/**
+ * 主动消息名单条目（`list_proactive_personas`）
+ *
+ * 形状: snake_case；`mode` 三态 auto / on / off，`effective` 为服务层结论
+ */
+export interface ProactivePersonaRow {
+  uid: string
+  name: string
+  kind: string
+  has_local_dialogue: boolean
+  mode: string
+  effective: boolean
+}
+
+/** 单日投递计数（投递概览）：本地日期 `YYYY-MM-DD` */
+export interface ProactiveDailyRow {
+  date: string
+  count: number
+}
+
+/** 投递与回应合计（窗口 0 = 不限；比率为空表示无投递） */
+export interface ProactiveTotals {
+  personas: number
+  deliveries: number
+  responded: number
+  response_rate: number | null
+  median_response_ms: number | null
+}
+
+/**
+ * 投递概览（`get_proactive_stats`）
+ *
+ * 形状: snake_case；`daily` 为全人格按日期升序聚合；调度内部状态不在其中
+ */
+export interface ProactiveOverview {
+  generated_at: number
+  daily_limit: number
+  daily_total_limit: number
+  daily_count: number
+  daily_date: string
+  daily: ProactiveDailyRow[]
+  last_sent_at: number | null
+  cooldown_hours: number
+  silence_streak_max: number
+  judge_yes_count: number
+  judge_no_count: number
+  last_judge_at: number | null
+  totals: ProactiveTotals
+}
+
+/**
+ * 版本检查结果（`check_update`）
+ *
+ * 形状: camelCase；检查失败时 `error` 有值，其余字段可能为 null
+ */
+export interface UpdateStatus {
+  currentVersion: string
+  latestVersion: string | null
+  updateAvailable: boolean
+  releaseUrl: string | null
+  releaseNotesPreview: string | null
+  error: string | null
+}
+
+/**
+ * 诊断导出回执（`export_diagnostics`）
+ *
+ * 形状: camelCase；路径由原生保存对话框选出，前端不传入
+ */
+export interface DiagnosticsExport {
+  outputPath: string
+  fileSizeBytes: number
+  fileSizeDisplay: string
+  collectionStatus: Record<string, string>
+  warnings: string[]
+}

@@ -10,6 +10,7 @@
  * - 左右方向键在段间移动并同步选中，焦点跟随
  * - 段数上限 5、选中段不换行；默认档选中白底 + 品牌描边 + 微小投影
  * - `plain` 档去掉容器背板，各段自成卡片键（用于记忆页页签）
+ * - `lg` 档放大段高与左右内距，`pill` 档把容器与各段切成胶囊（用于设置页范围切换）
  * - 可选计数徽标用于带数量的页签，缺省不占位
  */
 
@@ -30,11 +31,17 @@ const props = withDefaults(
     disabled?: boolean
     /** default = 凹槽分段；plain = 无背板、各段独立成键 */
     variant?: 'default' | 'plain'
+    /** md = 常规段高；lg = 放大段高与内距 */
+    size?: 'md' | 'lg'
+    /** 容器与各段切成胶囊 */
+    pill?: boolean
   }>(),
   {
     label: '',
     disabled: false,
     variant: 'default',
+    size: 'md',
+    pill: false,
   },
 )
 
@@ -73,7 +80,11 @@ function onKeydown(event: KeyboardEvent, index: number): void {
   <div
     ref="group"
     class="segmented"
-    :class="[`segmented--${variant}`, { 'is-disabled': disabled }]"
+    :class="[
+      `segmented--${variant}`,
+      `segmented--${size}`,
+      { 'segmented--pill': pill, 'is-disabled': disabled },
+    ]"
     role="tablist"
     :aria-label="label || undefined"
   >
@@ -211,5 +222,32 @@ function onKeydown(event: KeyboardEvent, index: number): void {
 
 .segmented--plain .segmented-item:focus-visible {
   box-shadow: var(--focus-ring);
+}
+
+/* ── lg：放大段高与内距 ── */
+.segmented--lg {
+  gap: var(--space-6);
+  padding: var(--space-4);
+}
+
+.segmented--lg .segmented-item {
+  height: 30px;
+  padding: 0 var(--space-20);
+  font-size: var(--fs-body);
+  font-weight: var(--fw-semibold);
+}
+
+.segmented--lg .segmented-count {
+  min-width: 18px;
+  line-height: 18px;
+}
+
+/* ── pill：容器与各段切成胶囊 ── */
+.segmented--pill {
+  border-radius: var(--radius-pill);
+}
+
+.segmented--pill .segmented-item {
+  border-radius: var(--radius-pill);
 }
 </style>

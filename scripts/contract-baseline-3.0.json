@@ -37,6 +37,7 @@
     "update_setting",
     "get_full_config",
     "update_full_config",
+    "get_default_config",
     "get_mcp_info",
     "export_sessions_json",
     "export_sessions_markdown",
@@ -59,6 +60,7 @@
     "import_persona_preset",
     "list_proactive_personas",
     "set_proactive_persona",
+    "get_proactive_stats",
     "get_channel_status",
     "start_channel",
     "stop_channel",
@@ -100,7 +102,9 @@
     "set_image_source_dir",
     "persona_export",
     "set_vision_support",
-    "download_embedding_model"
+    "download_embedding_model",
+    "get_default_config",
+    "get_proactive_stats"
   ],
   "cli_top": [
     "Ask",

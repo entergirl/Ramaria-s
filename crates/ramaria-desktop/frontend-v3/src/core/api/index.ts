@@ -17,9 +17,12 @@ import type {
   AppStateValue,
   BackendConfig,
   BehaviorRuleView,
+  ChannelBinding,
+  ChannelPanel,
   ClearCacheResult,
   ConfigWriteReceipt,
   DegradedReason,
+  DiagnosticsExport,
   EmbeddingModelView,
   EmbeddingValidation,
   FactList,
@@ -29,6 +32,7 @@ import type {
   ImportStatusView,
   IndexRebuildReceipt,
   IndexStatusView,
+  McpInfo,
   MemoryEvent,
   MemoryL1,
   PersonaExportReceipt,
@@ -40,6 +44,8 @@ import type {
   PresetImportOutcome,
   PresetImportPreview,
   PrivacyStatus,
+  ProactiveOverview,
+  ProactivePersonaRow,
   ProfileStatus,
   RuleEnabledReceipt,
   RuleEvidenceResponse,
@@ -49,6 +55,7 @@ import type {
   SessionSummary,
   SettingItem,
   TraitEvidenceChain,
+  UpdateStatus,
   VisionSupportReceipt,
 } from './dto'
 
@@ -160,6 +167,10 @@ export const configApi = {
   },
   updateFull(configJson: string) {
     return invoke<ConfigWriteReceipt>(COMMANDS.config.updateFull, { configJson })
+  },
+  /** 出厂默认配置（JSON 文本）：设置页「恢复默认」的唯一来源 */
+  getDefaults() {
+    return invoke<string>(COMMANDS.config.getDefaults)
   },
 }
 
@@ -367,5 +378,78 @@ export const systemApi = {
   },
   setImageSourceDir(path: string | null = null) {
     return invoke<string>(COMMANDS.system.setImageSourceDir, { path })
+  },
+}
+
+/** MCP 接入：面板信息（配置读写仍走 config 域） */
+export const mcpApi = {
+  getInfo() {
+    return invoke<McpInfo>(COMMANDS.mcp.getInfo)
+  },
+}
+
+/** 主动对话：名单三态与投递概览 */
+export const proactiveApi = {
+  listPersonas() {
+    return invoke<ProactivePersonaRow[]>(COMMANDS.proactive.listPersonas)
+  },
+  /** 保存人格主动开关；`mode` 为 auto / on / off */
+  setPersona(uid: string, mode: string) {
+    return invoke<string>(COMMANDS.proactive.setPersona, { uid, mode })
+  },
+  getStats() {
+    return invoke<ProactiveOverview>(COMMANDS.proactive.getStats)
+  },
+}
+
+/** 社交通道：状态、启停与绑定 */
+export const channelApi = {
+  getStatus() {
+    return invoke<ChannelPanel>(COMMANDS.channel.getStatus)
+  },
+  start() {
+    return invoke<ChannelPanel>(COMMANDS.channel.start)
+  },
+  stop() {
+    return invoke<ChannelPanel>(COMMANDS.channel.stop)
+  },
+  listBindings() {
+    return invoke<ChannelBinding[]>(COMMANDS.channel.listBindings)
+  },
+  /** 写入绑定；未提供字段保持现值（`personaUid` 传空串表示清除覆盖） */
+  setBinding(
+    channel: string,
+    externalRef: string,
+    personaUid: string | null = null,
+    enabled: boolean | null = null,
+    allowProactive: boolean | null = null,
+  ) {
+    return invoke<ChannelBinding>(COMMANDS.channel.setBinding, {
+      channel,
+      externalRef,
+      personaUid,
+      enabled,
+      allowProactive,
+    })
+  },
+}
+
+/** 数据导出：写入用户选定路径 */
+export const exportApi = {
+  json(outputPath: string) {
+    return invoke<string>(COMMANDS.export.json, { outputPath })
+  },
+  markdown(outputPath: string) {
+    return invoke<string>(COMMANDS.export.markdown, { outputPath })
+  },
+}
+
+/** 诊断与更新：检查更新、诊断包导出（版本号经 `systemApi.getVersion`） */
+export const diagnosticsApi = {
+  checkUpdate() {
+    return invoke<UpdateStatus>(COMMANDS.diagnostics.checkUpdate)
+  },
+  exportDiagnostics() {
+    return invoke<DiagnosticsExport>(COMMANDS.diagnostics.exportDiagnostics)
   },
 }
