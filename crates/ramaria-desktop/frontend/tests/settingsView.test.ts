@@ -17,6 +17,7 @@ import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 
 import type { ConfigWriteReceipt } from '../src/core/api/dto'
 import { setTauriRuntime, type TauriRuntime } from '../src/core/transport'
+import { useAppStore } from '../src/stores/app'
 import { useDebugStore } from '../src/stores/debug'
 import { useNavStore } from '../src/stores/nav'
 import SettingsView from '../src/views/settings/index.vue'
@@ -78,6 +79,9 @@ function makeRuntime(config: RuntimeConfig) {
     full: structuredClone(config.full),
     latest: null as Record<string, unknown> | null,
     failFullOnce: false,
+    pendingFull: false,
+    hangWrite: false,
+    releaseWrite: null as (() => void) | null,
     receipt: { fileOk: true, dbOk: true, failures: [] } as ConfigWriteReceipt,
     written: null as Record<string, unknown> | null,
     apiKey: null as string | null,
@@ -90,6 +94,9 @@ function makeRuntime(config: RuntimeConfig) {
         calls.push({ command, args })
         switch (command) {
           case 'get_full_config': {
+            if (state.pendingFull) {
+              return await new Promise(() => {})
+            }
             if (state.failFullOnce) {
               state.failFullOnce = false
               throw new Error('数据库读取失败')
@@ -101,12 +108,41 @@ function makeRuntime(config: RuntimeConfig) {
           case 'update_full_config': {
             const next = JSON.parse(String(args.configJson)) as Record<string, unknown>
             state.written = next
+            if (state.hangWrite) {
+              await new Promise<void>((resolve) => {
+                state.releaseWrite = resolve
+              })
+            }
             if (state.receipt.fileOk || state.receipt.dbOk) {
               state.full = next
               state.latest = next
             }
             return state.receipt
           }
+          case 'get_proactive_stats':
+            return {
+              generated_at: 0,
+              daily_limit: 0,
+              daily_total_limit: 0,
+              daily_count: 0,
+              daily_date: '',
+              daily: [],
+              last_sent_at: null,
+              cooldown_hours: 8,
+              silence_streak_max: 0,
+              judge_yes_count: 0,
+              judge_no_count: 0,
+              last_judge_at: null,
+              totals: {
+                personas: 0,
+                deliveries: 0,
+                responded: 0,
+                response_rate: null,
+                median_response_ms: null,
+              },
+            }
+          case 'list_proactive_personas':
+            return []
           case 'update_backend_config': {
             state.apiKey = args.apiKey ? String(args.apiKey) : null
             return 'ok'
@@ -166,11 +202,16 @@ function buttonByText(host: ButtonHost, text: string) {
   return button
 }
 
-async function mountSettings(path: string, runtimeConfig: RuntimeConfig = {
-  full: sampleFull(),
-  defaults: sampleDefaults(),
-}) {
+async function mountSettings(
+  path: string,
+  runtimeConfig: RuntimeConfig = {
+    full: sampleFull(),
+    defaults: sampleDefaults(),
+  },
+  configure?: (state: ReturnType<typeof makeRuntime>['state']) => void,
+) {
   const { runtime, calls, state } = makeRuntime(runtimeConfig)
+  configure?.(state)
   setTauriRuntime(runtime)
   const pinia = createPinia()
   setActivePinia(pinia)
@@ -360,5 +401,84 @@ describe('设置视图', () => {
     expect((input.element as HTMLInputElement).value).toBe('http://127.0.0.1:9999/v1')
     expect(card.text()).toContain('未保存')
     expect(state.written).not.toBeNull()
+  })
+})
+
+describe('视图状态', () => {
+  it('配置读取在途时给加载态、忙碌标记与骨架', async () => {
+    const { wrapper } = await mountSettings('/settings/basic/model', undefined, (state) => {
+      state.pendingFull = true
+    })
+
+    expect(wrapper.find('.settings').attributes('data-view-state')).toBe('loading')
+    expect(wrapper.find('.settings').attributes('aria-busy')).toBe('true')
+    expect(wrapper.findAll('.s-grid-item')).toHaveLength(2)
+  })
+
+  it('局部空：主动消息名单与投递概览给卡内说明，同页其它卡照常渲染', async () => {
+    const { wrapper } = await mountSettings('/settings/basic/proactive')
+
+    expect(wrapper.text()).toContain('还没有活跃人格')
+    expect(wrapper.text()).toContain('还没有主动投递记录')
+    expect(wrapper.find('[data-card="proactive-core"]').exists()).toBe(true)
+  })
+
+  it('嵌入缺失与模型不可用各自输出降级标记', async () => {
+    const { wrapper } = await mountSettings('/settings/basic/model')
+    const app = useAppStore()
+
+    app.appState = 'degraded'
+    app.degradedReason = 'embedding_missing'
+    await nextTick()
+    expect(wrapper.find('.settings').attributes('data-degraded')).toBe('embedding')
+
+    app.degradedReason = 'llm_unavailable'
+    await nextTick()
+    expect(wrapper.find('.settings').attributes('data-degraded')).toBe('llm')
+  })
+
+  it('索引构建中为 index，部分向量缺失为 partial', async () => {
+    const { wrapper } = await mountSettings('/settings/basic/model')
+    const app = useAppStore()
+
+    app.appState = 'ready'
+    app.indexStatus = {
+      status: 'building',
+      loaded: 1,
+      total: 4,
+      failed: 0,
+      percent: 25,
+      updated_at: 0,
+    }
+    await nextTick()
+    expect(wrapper.find('.settings').attributes('data-degraded')).toBe('index')
+
+    app.indexStatus = {
+      status: 'ready',
+      loaded: 4,
+      total: 4,
+      failed: 3,
+      percent: 100,
+      updated_at: 0,
+    }
+    await nextTick()
+    expect(wrapper.find('.settings').attributes('data-degraded')).toBe('partial')
+  })
+
+  it('保存中锁定卡片并输出受限标记，完成后解除', async () => {
+    const { wrapper, state } = await mountSettings('/settings/basic/model', undefined, (draft) => {
+      draft.hangWrite = true
+    })
+    const input = wrapper.find('[data-field="backend.base_url"] input')
+    await input.setValue('http://127.0.0.1:7777/v1')
+    await buttonByText(wrapper.find('[data-card="backend"]'), '保存').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.settings').attributes('data-restricted')).toBe('locked')
+    expect((input.element as HTMLInputElement).disabled).toBe(true)
+
+    state.releaseWrite?.()
+    await flushPromises()
+    expect(wrapper.find('.settings').attributes('data-restricted')).toBeUndefined()
   })
 })

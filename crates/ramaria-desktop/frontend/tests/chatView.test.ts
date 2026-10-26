@@ -14,6 +14,7 @@ import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import type { SessionDetail, SessionSummary } from '../src/core/api/dto'
 import { setTauriRuntime } from '../src/core/transport'
 import ChatView from '../src/views/chat/index.vue'
+import { installChatRuntime, type ChatRuntimeOptions } from './helpers/chatRuntime'
 
 const NOW = Date.now()
 
@@ -295,6 +296,66 @@ describe('跳转来源', () => {
 
     const { wrapper } = await mountFrom({})
     expect(wrapper.find('.head-actions .btn--ghost').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})
+
+describe('视图状态', () => {
+  async function mountWith(options: ChatRuntimeOptions): Promise<VueWrapper> {
+    installChatRuntime(options)
+    const router = makeRouter()
+    await router.push('/')
+    await router.isReady()
+    const wrapper = mount(ChatView, {
+      global: { plugins: [createPinia(), router] },
+      attachTo: document.body,
+    })
+    await flushPromises()
+    return wrapper
+  }
+
+  it('首屏在途显示加载态与忙碌标记', async () => {
+    const wrapper = await mountWith({
+      sessions: [summary()],
+      commands: { get_session: () => new Promise(() => {}) },
+    })
+
+    expect(wrapper.find('[data-view-state]').attributes('data-view-state')).toBe('loading')
+    expect(wrapper.find('.chat').attributes('aria-busy')).toBe('true')
+    wrapper.unmount()
+  })
+
+  it('无会话时为空态，输入区保持可用', async () => {
+    const wrapper = await mountWith({ sessions: [] })
+
+    expect(wrapper.find('[data-view-state]').attributes('data-view-state')).toBe('empty')
+    expect(wrapper.text()).toContain('还没有消息')
+    expect(wrapper.find('textarea').exists()).toBe(true)
+    expect(wrapper.find('textarea').attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('读取会话失败显示错误态并禁用输入', async () => {
+    const wrapper = await mountWith({
+      sessions: [summary()],
+      commands: {
+        get_session: () => {
+          throw new Error('会话读取失败')
+        },
+      },
+    })
+
+    expect(wrapper.find('[data-view-state]').attributes('data-view-state')).toBe('error')
+    expect(wrapper.text()).toContain('会话读取失败')
+    expect(wrapper.find('textarea').attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
+  it('隐私未确认时给出隐私降级条与降级标记', async () => {
+    const wrapper = await mountWith({ privacy: 'NeedsConfirmation' })
+
+    expect(wrapper.find('.chat').attributes('data-degraded')).toBe('privacy')
+    expect(wrapper.text()).toContain('去确认')
     wrapper.unmount()
   })
 })

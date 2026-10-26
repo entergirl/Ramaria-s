@@ -24,6 +24,7 @@ async function mountAt(path: string) {
     history: createMemoryHistory(),
     routes: [
       { path: '/', name: 'chat', component: Blank },
+      { path: '/memory', name: 'memory', component: Blank },
       { path: '/setup', name: 'setup', component: Blank },
       { path: '/error', name: 'error', component: Blank },
       { path: '/settings', name: 'settings', component: Blank },
@@ -87,6 +88,34 @@ describe('圆键导航', () => {
     await nextTick()
     expect(element.style.left).toBe('132px')
     expect(element.style.top).toBe('132px')
+    wrapper.unmount()
+  })
+
+  it('点击视图键切到对应视图', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', name: 'chat', component: Blank },
+        { path: '/memory', name: 'memory', component: Blank },
+      ],
+    })
+    await router.push('/')
+    await router.isReady()
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const wrapper = mount(NavDock, {
+      global: { plugins: [pinia, router] },
+      attachTo: document.body,
+    })
+    await wrapper.find('.orb--core').trigger('click')
+
+    const memory = wrapper
+      .findAll('[data-orb="sub"]')
+      .find((node) => node.text().includes('记忆'))
+    await memory?.trigger('click')
+    await flushPromises()
+
+    expect(router.currentRoute.value.name).toBe('memory')
     wrapper.unmount()
   })
 

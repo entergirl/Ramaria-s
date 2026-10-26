@@ -133,7 +133,7 @@ const defaultLabel = computed(() => {
   width: 40%;
   border-radius: calc(var(--bar-height) / 2);
   background: var(--brand);
-  animation: progress-slide 1200ms var(--ease-in-out) infinite;
+  animation: progress-slide var(--dur-loop-pulse) var(--ease-in-out) infinite;
 }
 
 @keyframes progress-slide {

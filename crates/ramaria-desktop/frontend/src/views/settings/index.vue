@@ -195,6 +195,7 @@ watch(advancedUnlocked, (unlocked) => {
       class="settings"
       :data-view-state="viewState"
       :data-degraded="degradedKind"
+      :data-restricted="savingCard ? 'locked' : undefined"
       :aria-busy="loading ? 'true' : undefined"
     >
       <SettingsToolbar

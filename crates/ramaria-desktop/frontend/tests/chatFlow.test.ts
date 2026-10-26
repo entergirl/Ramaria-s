@@ -6,7 +6,7 @@
  * - 发送失败给出失败气泡与重试，重试复用原文
  * - 撤回需二次确认，成功后折叠为系统条
  * - 发图走文件对话框与本地发图命令，图片消息落到列表
- * - 横幅优先级：只读高于索引；索引未建立与模型不可用各自出条
+ * - 横幅优先级：只读高于索引与模型不可用；索引未建立与模型不可用各自出条
  */
 
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
@@ -372,6 +372,28 @@ describe('横幅', () => {
     const banner = wrapper.find('.banner')
     expect(banner.attributes('data-kind')).toBe('readonly')
     expect(banner.text()).not.toContain('索引未建立')
+    expect(wrapper.find('[data-restricted]').attributes('data-restricted')).toBe('readonly')
+    wrapper.unmount()
+  })
+
+  it('只读会话与模型不可用并存：只读横幅优先，降级标记仍记录模型侧', async () => {
+    installChatRuntime({
+      sessions: [summary({ id: 's2', channel: 'qq', persona_uid: 'rama-0001' })],
+      sessionDetail: detail('qq', [message({ sender_name: '小珊', sender_ref: '10001' })]),
+    })
+    const pinia = freshPinia()
+    const app = useAppStore()
+    app.appState = 'degraded'
+    app.degradedReason = 'llm_unavailable'
+    const wrapper = await mountChat(pinia)
+
+    await wrapper.find('.avatar').trigger('click')
+    await flushPromises()
+    await wrapper.find('.session-row').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.banner').attributes('data-kind')).toBe('readonly')
+    expect(wrapper.find('[data-degraded]').attributes('data-degraded')).toContain('llm')
     expect(wrapper.find('[data-restricted]').attributes('data-restricted')).toBe('readonly')
     wrapper.unmount()
   })

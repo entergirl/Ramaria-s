@@ -146,7 +146,7 @@ defineEmits<{
   margin-left: var(--space-4);
   background: var(--brand);
   vertical-align: -1px;
-  animation: bubble-caret 900ms steps(2, start) infinite;
+  animation: bubble-caret var(--dur-loop-caret) steps(2, start) infinite;
 }
 
 .bubble[data-variant='failed'] .bubble-body {

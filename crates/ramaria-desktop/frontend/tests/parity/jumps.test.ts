@@ -2,9 +2,9 @@
  * tests/parity/jumps.test.ts — 跨视图跳转矩阵守卫
  *
  * 覆盖:
- * - 清单结构：编号唯一、触发与目标非空、覆盖与不适用各带必填字段
+ * - 清单结构：编号唯一、触发与目标非空、全局 / 页内范围计数与规格口径一致
  * - 覆盖引用真实存在：条目指到的测试文件里的用例名没有被改名或删除
- * - 与 `frontend-spec-v2.md` §8 对齐：同编号行的触发 / 目标 / 参数逐字一致
+ * - 与 `frontend-spec-v3.md` §8 对齐：同编号行的触发 / 目标 / 参数逐字一致
  * - 参数 grep 兜底：跳转参数与一次性状态的含义在源码里有对应落点
  *
  * 说明:
@@ -21,13 +21,13 @@ const TEST_SOURCES = import.meta.glob('/tests/**/*.test.ts', {
   eager: true,
 }) as Record<string, string>
 
-const SPEC_SOURCES = import.meta.glob('/../../../../docs/dev-3.0/test/frontend-spec-v2.md', {
+const SPEC_SOURCES = import.meta.glob('/../../../../docs/dev-3.0/test/frontend-spec-v3.md', {
   query: '?raw',
   import: 'default',
   eager: true,
 }) as Record<string, string>
 
-const SRC_SOURCES = import.meta.glob('/src/views/{memory,persona,import,chat}/**/*.{ts,vue}', {
+const SRC_SOURCES = import.meta.glob('/src/{app,components,views}/**/*.{ts,vue}', {
   query: '?raw',
   import: 'default',
   eager: true,
@@ -48,9 +48,14 @@ function sourceBySuffix(sources: Record<string, string>, suffix: string): string
   return hit[1]
 }
 
+/** 去掉规格表格里的行内代码标记，便于逐字比对 */
+function plain(text: string): string {
+  return text.replace(/`/g, '')
+}
+
 /** 从规格 §8 的表格解析跳转矩阵行 */
 function matrixRows(): MatrixRow[] {
-  const lines = sourceBySuffix(SPEC_SOURCES, 'frontend-spec-v2.md').split('\n')
+  const lines = sourceBySuffix(SPEC_SOURCES, 'frontend-spec-v3.md').split('\n')
   const start = lines.findIndex((line) => line.trim() === '## 8. 跨视图跳转矩阵')
   if (start < 0) {
     throw new Error('规格文档缺少 §8 跳转矩阵小节')
@@ -68,9 +73,9 @@ function matrixRows(): MatrixRow[] {
     }
     rows.push({
       no: columns[1] ?? '',
-      trigger: columns[2] ?? '',
-      target: (columns[3] ?? '').replace(/`/g, ''),
-      params: (columns[4] ?? '').replace(/`/g, ''),
+      trigger: plain(columns[2] ?? ''),
+      target: plain(columns[3] ?? ''),
+      params: plain(columns[4] ?? ''),
     })
   }
   return rows
@@ -114,6 +119,14 @@ describe('跳转矩阵清单结构', () => {
     }
   })
 
+  it('全局 13 条、页内 2 条，与规格口径一致', () => {
+    expect(JUMP_MATRIX.filter((entry) => entry.scope === 'global')).toHaveLength(13)
+    expect(JUMP_MATRIX.filter((entry) => entry.scope === 'page')).toHaveLength(2)
+    expect(JUMP_MATRIX.map((entry) => entry.no)).toEqual(
+      Array.from({ length: 15 }, (_, index) => index + 1),
+    )
+  })
+
   it('覆盖引用指向真实存在的用例', () => {
     const names = new Map<string, string[]>()
     for (const entry of JUMP_MATRIX) {
@@ -155,9 +168,19 @@ describe('跳转矩阵与规格对齐', () => {
 
 /** 每条目在源码里的落点锚点（改实现即失效，防清单与代码脱节） */
 const ANCHOR: Record<number, string[]> = {
+  1: ["app.appState === 'needs_setup'"],
+  2: ['DownloadBanner'],
+  3: ["state === 'ready' || state === 'degraded'"],
+  4: ['degradedReason'],
+  5: ["app.appState === 'fatal_error'"],
+  6: ['router.push({ name: id })'],
   7: ["fromView: 'memory'"],
   8: ["fromView === 'memory'", 'consumeSnapshot'],
   9: ['requestPreselect'],
   10: ["name: 'chat'"],
+  11: ["fromView: 'proactive'"],
+  12: ['FULLSCREEN_ROUTES.has(current)'],
   13: ['doBackToList'],
+  14: ['aboutOpen'],
+  15: ['defaultSectionId'],
 }

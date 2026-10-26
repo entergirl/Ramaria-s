@@ -161,7 +161,7 @@ withDefaults(
   border: 2px solid currentColor;
   border-right-color: transparent;
   border-radius: var(--radius-full);
-  animation: btn-spin 700ms linear infinite;
+  animation: btn-spin var(--dur-loop-spin) linear infinite;
 }
 
 @keyframes btn-spin {

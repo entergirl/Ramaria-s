@@ -153,7 +153,7 @@ function onInput(event: Event): void {
   border: 2px solid var(--text-3);
   border-right-color: transparent;
   border-radius: var(--radius-full);
-  animation: field-spin 700ms linear infinite;
+  animation: field-spin var(--dur-loop-spin) linear infinite;
 }
 
 .field-message {

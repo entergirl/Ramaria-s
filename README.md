@@ -233,9 +233,11 @@ Tauri 桌面应用 / CLI（桌面装配社交通道）           MCP 客户端�
     ├── ramaria-llm        LLM Provider（LM Studio / DeepSeek / OpenAI）
     ├── ramaria-importer   聊天记录导入（QQ 解析 + 双模式导入）
     ├── ramaria-channel    社交通道（QQ / Telegram 协议壳 + 运行时）
-    ├── ramaria-storage    SQLite（30 张表，Repository 模式）
+    ├── ramaria-storage    SQLite（29 张表，Repository 模式；单基线 schema）
     └── ramaria-core       核心类型 & Trait（零 I/O）
 ```
+
+> 另有 dev-only 的 `ramaria-testkit`（迁移驱动测试库 / 单份 mock / 领域夹具，`publish = false`，不随发行）。
 
 <details>
 <summary>展开查看模块职责与依赖关系</summary>
@@ -245,15 +247,15 @@ Tauri 桌面应用 / CLI（桌面装配社交通道）           MCP 客户端�
 | 模块 | 技术选型 | 职责 |
 |------|----------|------|
 | **ramaria-core** | 纯 Rust 类型系统 | 核心类型 + 配置 + 错误体系 + StorageBackend 契约（StoreCrud / StoreInfrastructure 分组）+ LlmProvider / EmbeddingProvider trait |
-| **ramaria-storage** | SQLite（sqlx） | 30 张表 schema、23 个 Repository、手动行映射避免 derive 侵入 |
-| **ramaria-memory** | 自研管线 | 分层摘要→事件提取→性格推断、向量+BM25+图谱+关键词镜像多通道 RAG、Ebbinghaus 衰减、RRF 融合、Token Budgeting |
+| **ramaria-storage** | SQLite（sqlx） | 29 张表单基线 schema、按实体分模块的 Repository、手动行映射避免 derive 侵入 |
+| **ramaria-memory** | 自研管线 | 分层摘要→事件提取→性格推断、向量+BM25+图谱+关键词镜像多通道 RAG、向量持久化（`memory_vectors`）、Ebbinghaus 衰减、RRF 融合、Token Budgeting |
 | **ramaria-llm** | reqwest + candle | 3 后端适配器、SSE 流式传输、API Key 凭据管理器、指数退避重试、原生 safetensors 嵌入（bge-small-zh-v1.5 / Qwen3-Embedding-0.6B，CUDA 优先） |
 | **ramaria-importer** | encoding_rs + sha2 | QQ 聊天记录解析（QQChatExporter v6.x JSON，流式解析）、快速/深度双模式、双画像自动创建、指纹去重 |
 | **ramaria-service** | 纯 Rust 用例层 | 记忆服务化能力出口：召回装配、会话解析与封存、外部写入、人格读取、空闲检查（与传输无关，桌面与 MCP 共用） |
 | **ramaria-mcp** | rmcp（stdio） | MCP 协议壳：七个工具的 schema、门禁与白名单前置校验、结果包装（isError）；不含业务逻辑 |
 | **ramaria-channel** | tokio-tungstenite + reqwest | 社交通道协议壳与运行时：QQ（OneBot v11 正向 WS）/ Telegram（Bot API 长轮询）传输、图片下载组装、单事件编排、主动投递路由；业务语义一律经服务层 |
-| **ramaria-cli** | clap derive | 20 个子命令、交互式 REPL、`--json` 信封、色彩输出 |
-| **ramaria-desktop** | Tauri 2 | 原生窗口、系统托盘、通知、CSP、Markdown 渲染、前端 JS（7 个视图 + 设置页模块目录，含规则/调试） |
+| **ramaria-cli** | clap derive | 21 个子命令、交互式 REPL、`--json` 信封、色彩输出 |
+| **ramaria-desktop** | Tauri 2 + Vue 3 | 原生窗口、系统托盘、通知、严格 CSP；Vue 3 + Vite + TS 前端（9 视图、圆键导航、设计令牌、设置 schema 单源） |
 
 **依赖关系（自底向上）**
 
@@ -343,20 +345,20 @@ L0 原始消息（永久保留，不删除，不过滤，标记发言人）
 ```
 crates/
 ├── ramaria-core/          # 核心类型 & Trait（零 I/O）
-├── ramaria-storage/       # SQLite 存储层（30 张表，23 个 Repository）
+├── ramaria-storage/       # SQLite 存储层（29 张表，单基线 schema）
 ├── ramaria-memory/        # 记忆管线 + RAG + 性格推断
 ├── ramaria-llm/           # LLM Provider（LM Studio / DeepSeek / OpenAI）
 ├── ramaria-importer/      # QQ 聊天记录导入
 ├── ramaria-service/       # 唯一能力层（用例：召回 / 生成 / 封存 / 会话生命周期）
 ├── ramaria-channel/       # 社交通道（QQ / Telegram 协议壳 + 运行时）
 ├── ramaria-mcp/           # MCP 协议壳（stdio，七个工具）
-├── ramaria-cli/           # CLI 入口（20 个子命令）
-└── ramaria-desktop/       # Tauri 2 桌面应用
+├── ramaria-cli/           # CLI 入口（21 个子命令）
+├── ramaria-desktop/       # Tauri 2 桌面应用（Vue 3 前端）
+└── ramaria-testkit/       # dev-only 测试基建（不随发行）
 config/
 ├── default.toml           # 默认配置模板
 └── personas/              # 人格定义文件（TOML）
 docs/                      # 用户文档
-tests/                     # 集成测试
 ```
 
 **规模统计**：10 个 crate（目录 / 模块 / 测试分布见 `../docs/architecture-ai-agent.md`）。

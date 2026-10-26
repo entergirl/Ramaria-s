@@ -185,7 +185,7 @@ const canSave = computed(
 
 .avatar-text {
   position: relative;
-  z-index: 1;
+  z-index: var(--z-local);
   line-height: 1;
   /* 汉字墨迹偏左上，按视觉重心做亚像素级光学微调 */
   transform: translate(0.04em, 0.02em);
@@ -194,7 +194,7 @@ const canSave = computed(
 /* 图片头像铺满圆形，不叠加文字头像的内描边 */
 .avatar-img {
   position: relative;
-  z-index: 1;
+  z-index: var(--z-local);
   width: 100%;
   height: 100%;
   border-radius: var(--radius-full);
@@ -261,7 +261,7 @@ const canSave = computed(
 .head-status[data-streaming] .dot {
   background: var(--brand);
   box-shadow: 0 0 0 3px var(--brand-surface);
-  animation: status-pulse 1200ms var(--ease-in-out) infinite;
+  animation: status-pulse var(--dur-loop-pulse) var(--ease-in-out) infinite;
 }
 
 .head-actions {

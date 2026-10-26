@@ -98,7 +98,7 @@ const category = computed(() =>
 
 .avatar-text {
   position: relative;
-  z-index: 1;
+  z-index: var(--z-local);
   line-height: 1;
   transform: translate(0.04em, 0.02em);
 }

@@ -2,7 +2,7 @@
  * tests/parity/checklist.test.ts — parity 清单守卫
  *
  * 覆盖:
- * - 清单结构：四视图齐全、条目编号唯一、维度合法、覆盖与不适用各带必填字段
+ * - 清单结构：九视图齐全、条目编号唯一、维度合法、覆盖与不适用各带必填字段
  * - 覆盖引用真实存在：条目指到的测试文件里的用例名没有被改名或删除
  * - 与 `design-qa.md` §9 对齐：格名集合一致、`[x]` 对应已覆盖、`[-]` 对应不适用
  *
@@ -75,13 +75,17 @@ function caseNamesOf(file: string): string[] {
 }
 
 describe('parity 清单结构', () => {
-  it('五视图齐全且顺序固定', () => {
+  it('九视图齐全且顺序固定', () => {
     expect(PARITY_CHECKLIST.map((item) => item.view)).toEqual([
+      'chat',
       'memory',
       'persona',
       'rules',
       'import',
+      'settings',
       'debug',
+      'setup',
+      'error',
     ])
   })
 
@@ -146,11 +150,11 @@ describe('parity 清单与设计 QA 对齐', () => {
     })
   }
 
-  it('五个视图的状态格合计与文档一致', () => {
+  it('九个视图的状态格合计与文档一致', () => {
     const total = PARITY_CHECKLIST.reduce(
       (sum, view) => sum + view.entries.filter((entry) => entry.dimension === 'state').length,
       0,
     )
-    expect(total).toBe(34)
+    expect(total).toBe(60)
   })
 })

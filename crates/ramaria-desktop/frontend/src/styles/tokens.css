@@ -333,6 +333,9 @@
   --dur-slow: 320ms;   /* 视图进入 / 模态 */
 
   --dur-shimmer: 1400ms;  /* 骨架微光一个周期 */
+  --dur-loop-spin: 700ms;    /* 环形加载器转速（按钮 / 字段） */
+  --dur-loop-caret: 900ms;   /* 流式光标闪烁一个周期 */
+  --dur-loop-pulse: 1200ms;  /* 状态点脉冲与不定进度一个周期 */
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -341,6 +344,9 @@
     --dur-base: 0ms;
     --dur-slow: 0ms;
     --dur-shimmer: 0ms;
+    --dur-loop-spin: 0ms;
+    --dur-loop-caret: 0ms;
+    --dur-loop-pulse: 0ms;
   }
 }
 
@@ -348,6 +354,7 @@
    遮罩在下、圆键在上；模态与 Toast 高于圆键，提示层最高 */
 
 :root {
+  --z-local: 1;   /* 组件内部层叠（头像文字压在背景圆上） */
   --z-sticky: 10;
   --z-veil: 40;
   --z-nav: 45;
