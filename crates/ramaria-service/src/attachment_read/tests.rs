@@ -225,6 +225,16 @@ fn align_skips_no_file_and_returns_none_on_miss() {
     assert_eq!(align_slot(&rows, &miss, 1), None, "槽位越界返回 None");
 }
 
+/// 描述槽按归一口径比较：正文侧已折叠换行并转全角方括号，附件侧原文仍可命中。
+#[test]
+fn align_matches_normalized_desc_slot() {
+    let rows = vec![attachment(1, Some(IMAGE_MD5), Some("第一行\n第二行 [注]"))];
+    let rendered = replace_image_placeholders("[图片#fccb86f2]", &build_render_map(&rows));
+    let slots = scan_image_slots(&rendered);
+    assert_eq!(slots.len(), 1, "渲染后应为一个描述槽");
+    assert_eq!(align_slot(&rows, &slots, 0), Some(0));
+}
+
 // ---- 端到端（真实临时库 + 临时导出目录） ----
 
 /// 源文件命中 → 二读缓存命中 → 删源后三读仍成功（缓存兜底）。
@@ -393,6 +403,38 @@ async fn read_aligns_desc_slot_and_reverse_lookup() {
         .expect("反查兜底读取应成功");
     assert_eq!(read.bytes, jpeg);
     assert!(!read.from_cache, "首读应来自源文件");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 多行 / 含方括号的描述（渲染时归一为单行）仍能对齐到附件并读出图片。
+#[tokio::test]
+async fn read_aligns_normalized_multiline_desc_slot() {
+    let (engine, storage, dir) = engine_with_db("attach-read-desc-multiline").await;
+    let session = storage.create_session(None).await.expect("创建会话应成功");
+
+    let message_id = seed_image_message(
+        &storage,
+        session.id,
+        "/download?fileid=2",
+        Some(IMAGE_MD5),
+        "[图片#fccb86f2]",
+        Some("### 画面内容\n第一段 [注] 第二段"),
+    )
+    .await;
+
+    let file_name = "fccb86f2a1b695df3c37a1042a967a44_FCCB86F2A1B695DF3C37A1042A967A44.jpg";
+    let source = dir.join("resources").join("images").join(file_name);
+    std::fs::create_dir_all(source.parent().expect("源文件应有父目录")).expect("创建源目录应成功");
+    let jpeg = jpeg_bytes();
+    std::fs::write(&source, &jpeg).expect("写入源文件应成功");
+    register_root(&storage, &dir).await;
+
+    let cache_dir = dir.join("image_cache");
+    let read = read_message_image(&engine, message_id, 0, &cache_dir)
+        .await
+        .expect("多行描述应按归一后的正文对齐到附件");
+    assert_eq!(read.bytes, jpeg);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -90,8 +90,8 @@ mod utt;
 mod vector;
 
 pub use attachments::{
-    AttachmentStatus, MessageAttachment, build_render_map, image_placeholder_hash,
-    is_local_relative_ref, replace_image_placeholders,
+    AttachmentStatus, MessageAttachment, build_render_map, fold_description,
+    image_placeholder_hash, is_local_relative_ref, replace_image_placeholders,
 };
 pub use backend::{BackendConfig, LlmProvider, ModelCapability, PrivacyConsent};
 pub use channel::{ChannelBinding, ChannelPlatform};

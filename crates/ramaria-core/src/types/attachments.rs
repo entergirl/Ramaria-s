@@ -151,12 +151,35 @@ pub fn build_render_map(attachments: &[MessageAttachment]) -> HashMap<String, St
     map
 }
 
+/// 把描述文本规范为可嵌入占位符的形态。
+///
+/// 口径:
+/// - 换行（`\n` / `\r`）折叠为空格：渲染单行，保护块文本 / 对话文本的行结构；
+/// - 方括号转为全角：描述内出现 `[` `]` 会提前闭合占位符，使读取侧与展示侧都解析失败。
+///
+/// 参数:
+/// - `description`: 附件理解结果原文（可含多行）。
+///
+/// 返回:
+/// - 归一后的单行文本；同一原文恒得同一结果，供渲染与对齐共用。
+pub fn fold_description(description: &str) -> String {
+    description
+        .chars()
+        .map(|ch| match ch {
+            '\n' | '\r' => ' ',
+            '[' => '［',
+            ']' => '］',
+            other => other,
+        })
+        .collect()
+}
+
 /// 将文本中的 `[图片#{hash}]` 占位符替换为 `[图片: {描述}]`。
 ///
 /// 扫描规则:
 /// - 遇到 `[图片#` 后读取连续的 8 个 ASCII 字符再遇 `]` 视为占位符（严格 8 位）；
-/// - 命中 `render_map`（key 为 8 位小写 hex）→ 替换为 `[图片: {描述}]`；
-/// - 描述中的换行折叠为空格（渲染单行，保护块文本 / 对话文本的行结构）；
+/// - 命中 `render_map`（key 为 8 位小写 hex）→ 替换为 `[图片: {描述}]`（描述按
+///   [`fold_description`] 归一，保证占位符自身始终可解析）；
 /// - 未命中 / 格式不完整 → 原文保留（逐字符复制，不做任何其他改动）。
 ///
 /// 参数:
@@ -186,12 +209,7 @@ pub fn replace_image_placeholders(text: &str, render_map: &HashMap<String, Strin
             Some(description) => {
                 out.push_str(&rest[..pos]);
                 out.push_str("[图片: ");
-                // 描述可能含换行（文字类图片的识别文本按行存储）：渲染为单行
-                out.extend(
-                    description
-                        .chars()
-                        .map(|ch| if matches!(ch, '\n' | '\r') { ' ' } else { ch }),
-                );
+                out.push_str(&fold_description(description));
                 out.push(']');
                 rest = &after_prefix[9..];
             }
@@ -383,16 +401,24 @@ mod tests {
         assert_eq!(replace_image_placeholders("", &map), "");
     }
 
-    /// 描述文本本身含方括号形态时原样落入结果（换行折叠除外），不递归替换。
+    /// 描述文本本身含方括号形态时转全角落入结果（换行折叠除外），不递归替换。
     #[test]
-    fn replace_pushes_description_verbatim() {
+    fn replace_folds_description_brackets_and_newlines() {
         let mut map = HashMap::new();
         map.insert(
             "aabbccdd".to_string(),
-            "框架 [图片#deadbeef] 截图".to_string(),
+            "框架 [图片#deadbeef] 截图\n第二行".to_string(),
         );
         let rendered = replace_image_placeholders("前 [图片#aabbccdd] 后", &map);
-        assert_eq!(rendered, "前 [图片: 框架 [图片#deadbeef] 截图] 后");
+        assert_eq!(rendered, "前 [图片: 框架 ［图片#deadbeef］ 截图 第二行] 后");
+    }
+
+    /// 描述归一：换行折叠为空格、方括号转全角，其余字符不动；结果幂等。
+    #[test]
+    fn fold_description_is_single_line_and_bracket_free() {
+        let folded = fold_description("第一行\r\n第二行 [注] 尾巴");
+        assert_eq!(folded, "第一行  第二行 ［注］ 尾巴");
+        assert_eq!(fold_description(&folded), folded);
     }
 
     /// 附件状态 as_str / parse 往返；非法值返回 None。

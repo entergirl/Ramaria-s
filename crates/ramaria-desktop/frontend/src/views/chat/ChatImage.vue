@@ -11,8 +11,9 @@
  * - MIME 由字节魔数嗅探，Blob URL 在用完后立即释放
  * - 读取或解码失败不抛错，降级为文本卡片或重试入口
  * - 高度按图片比例自适应，超长图收窄并标记「长图」
+ * - 图片描述按多行展示（图注两行、降级卡片三行），不可读卡片可展开全文
  */
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import BaseSkeleton from '../../components/base/BaseSkeleton.vue'
 import { attachmentApi } from '../../core/api'
@@ -26,12 +27,19 @@ const props = defineProps<{
 
 type ImageStatus = 'idle' | 'loading' | 'ready' | 'failed' | 'unavailable'
 
+/** 降级卡片出现展开入口的描述长度阈值 */
+const EXPAND_THRESHOLD = 48
+
 const status = ref<ImageStatus>('idle')
 const url = ref('')
 const tall = ref(false)
+const expanded = ref(false)
 let objectUrl = ''
 let observer: IntersectionObserver | null = null
 let disposed = false
+
+/** 描述全文（缺省回退占位文案） */
+const fullDesc = computed(() => props.desc || '图片')
 
 /** 长图判定：高度超过宽度的 2.2 倍 */
 const TALL_RATIO = 2.2
@@ -130,9 +138,9 @@ onBeforeUnmount(() => {
     :data-tall="tall ? '' : undefined"
   >
     <span v-if="tall" class="image-badge">长图</span>
-    <img :src="url" :alt="desc || '图片'" @load="onLoad" @error="onError" />
+    <img :src="url" :alt="fullDesc" @load="onLoad" @error="onError" />
     <figcaption class="image-cap">
-      <span class="cap-name">{{ desc || '图片' }}</span>
+      <span class="cap-name" :title="fullDesc">{{ fullDesc }}</span>
     </figcaption>
   </figure>
 
@@ -145,7 +153,7 @@ onBeforeUnmount(() => {
   >
     <span class="fail-text">图片加载失败</span>
     <span class="image-cap">
-      <span class="cap-name">{{ desc || '图片' }}</span>
+      <span class="cap-name" :title="fullDesc">{{ fullDesc }}</span>
       <span class="cap-action">重新加载</span>
     </span>
   </button>
@@ -156,7 +164,17 @@ onBeforeUnmount(() => {
     class="image-card"
   >
     <span class="card-icon" aria-hidden="true">🖼</span>
-    <span class="cap-name">{{ desc || '图片不可读取' }}</span>
+    <div class="card-text">
+      <span class="cap-name" :class="{ 'is-clamped': !expanded }">{{ fullDesc }}</span>
+      <button
+        v-if="desc.length > EXPAND_THRESHOLD"
+        type="button"
+        class="cap-toggle"
+        @click="expanded = !expanded"
+      >
+        {{ expanded ? '收起' : '展开全文' }}
+      </button>
+    </div>
   </div>
 
   <div
@@ -222,10 +240,44 @@ onBeforeUnmount(() => {
   font-size: var(--fs-caption);
 }
 
+/* 描述按多行展示：单行省略会把长描述压成不可读的一行 */
 .cap-name {
+  display: -webkit-box;
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.card-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.image-card .cap-name.is-clamped {
+  -webkit-line-clamp: 3;
+}
+
+.cap-toggle {
+  align-self: flex-start;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--brand-text);
+  font-size: var(--fs-caption);
+  cursor: pointer;
+}
+
+.cap-toggle:focus-visible {
+  outline: none;
+  border-radius: var(--radius-check);
+  box-shadow: var(--focus-ring);
 }
 
 .cap-action {
@@ -257,8 +309,9 @@ onBeforeUnmount(() => {
 
 .image-card {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--space-8);
+  max-width: 100%;
   padding: var(--space-10) var(--space-12);
   border: 1px dashed var(--border-strong);
   border-radius: var(--radius-inner);

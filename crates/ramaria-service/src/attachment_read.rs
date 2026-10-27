@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::{
-    InboundAttachmentKind, MessageAttachment, build_render_map, replace_image_placeholders,
+    InboundAttachmentKind, MessageAttachment, build_render_map, fold_description,
+    replace_image_placeholders,
 };
 use uuid::Uuid;
 
@@ -182,7 +183,8 @@ fn desc_content(after: &str) -> Option<&str> {
 ///
 /// 规则:
 /// - `Hash(h)`: 在未消费附件中找 md5 小写以 `h` 小写为前缀的第一个 → 消费；
-/// - `Desc(d)`: 在未消费附件中找描述与 `d` 完全相等的第一个 → 消费；
+/// - `Desc(d)`: 在未消费附件中找描述按 [`fold_description`] 归一后与 `d` 相等的第一个 →
+///   消费（正文里的描述已按同一口径归一，两者必须同规范比较）；
 /// - `NoFile`: 不消费附件。
 ///
 /// 参数:
@@ -243,7 +245,12 @@ fn find_unused_attachment(
                 .iter()
                 .enumerate()
                 .position(|(index, attachment)| {
-                    !used[index] && attachment.description.as_deref() == Some(description.as_str())
+                    !used[index]
+                        && attachment
+                            .description
+                            .as_deref()
+                            .map(|raw| fold_description(raw) == *description)
+                            .unwrap_or(false)
                 })
         }
         ImageSlot::NoFile => None,

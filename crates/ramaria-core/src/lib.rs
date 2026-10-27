@@ -44,6 +44,6 @@ pub use types::{
     MemoryL1, Message, MessageAttachment, MessageKey, MessageRole, MessageSource, ModelCapability,
     Persona, PersonaExample, PersonaFact, PersonaKind, PersonalityTrait, Presentation,
     PrivacyConsent, ProfileField, Session, SessionMember, TraitEvidence, TraitLayer, TraitSource,
-    TraitStatus, build_render_map, image_placeholder_hash, is_local_relative_ref, new_id, now_ms,
-    replace_image_placeholders, uuid_from_db, uuid_to_db,
+    TraitStatus, build_render_map, fold_description, image_placeholder_hash, is_local_relative_ref,
+    new_id, now_ms, replace_image_placeholders, uuid_from_db, uuid_to_db,
 };
