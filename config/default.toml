@@ -8,7 +8,7 @@
 # - 修改后重启 Ramaria 生效
 
 # 版本控制（请勿手动修改）
-version = "2.9.0"
+version = "3.0.0"
 schema_version = 3
 
 # =========================================================
@@ -587,8 +587,8 @@ max_chars = 1200
 [channel]
 # 社交通道总开关（默认 false = 不启动任何平台）
 enabled = false
-# 通道级默认人格（绑定未覆盖时生效）
-default_persona_uid = "rama-0001"
+# 通道级默认人格覆盖（留空 = 跟随「默认对话人格」设置；绑定未覆盖时生效）
+default_persona_uid = ""
 # QQ 通道开关（OneBot v11 正向 WS）
 qq_enabled = false
 # QQ 正向 WebSocket 服务地址（协议端监听，Ramaria 作客户端）

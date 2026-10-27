@@ -1,821 +1,594 @@
-# Ramaria CLI 使用指南
+# Ramaria CLI 使用指南（3.0）
 
-> 版本：2.7（命令参考覆盖 setup / ask / chat / memory / blocks / index / import / export / session / config / persona / rule / style / fact / keyword / channel / diagnostics / status / probe / mcp 共 20 个子命令）
-> 适用平台：Windows / macOS / Linux（Windows 首发）
+> 版本：3.0
+> 适用平台：Windows 首发（源码可在 macOS / Linux 构建）
+> 读者：进阶用户、脚本与 Agent 开发者
+> 相关文档：[桌面使用指南](desktop-user-guide.md)、[隐私说明](privacy-notice.md)、[默认配置模板](../config/default.toml)
 
-## 概述
-
-`ramaria` 是 Ramaria 的命令行入口，支持对话、记忆查询（L1/L2/L3）、话语块管理（blocks）、索引管理、会话管理、配置修改、人格管理、行为规则管理（rule）、风格统计（style）、知识事实查询（fact）、关键词词典管理（keyword）、社交通道维护（channel）、数据导入/导出、诊断导出、状态探活（status）、探针实验（probe）与 MCP 服务端（`mcp serve`）。
-
-首次使用前需运行首次配置向导（`ramaria setup`）。**CLI 与桌面应用的数据目录相互独立**：CLI 的数据库由 `--db` 指定（默认 `data/ramaria_assistant.db`，`RAMARIA_DB_PATH` 覆盖）；桌面应用开发模式（`cargo tauri dev`）使用 `crates/ramaria-desktop/.ramaria-dev/`、生产模式使用 `%APPDATA%\Ramaria\data\`；API key 均保存在 Windows Credential Manager（不落盘）。
-
-**关于主动对话（v2.4 起步 / v2.5 收敛）**：主动对话（Ramaria 主动发起消息）**仅随桌面应用装配**——CLI 与 MCP 接入都不会主动发言。CLI 侧可正常查看与处理主动消息：`ramaria chat` / `session` 可见其所在会话与消息；主动消息同样参与记忆回流，`memory` / `blocks` / `persona` 等查询照常覆盖。是否启用由桌面「设置 → 主动对话」控制：全局开关与**逐人格三态开关**（「主动消息名单」）均在该页管理（`[proactive]` 配置组 + `settings` 键 `proactive.persona.{uid}`）；`ramaria probe baseline` 可只读查看投递 / 回应 / 判据计数。未读标记（会话未读计数与托盘徽标）为桌面体验，CLI 查询不受影响。
+`ramaria` 是 Ramaria 的命令行入口，覆盖首次配置、对话、记忆查询、导入导出、人格与规则管理、社交通道维护、MCP 服务端与评估探针，共 **21 个顶层子命令**。CLI 与桌面共用同一套服务层实现；默认数据目录相互独立，但可以用 `--db` 指向桌面的数据库共享同一份记忆。
 
 ---
 
-## 安装与运行
+## 1. 安装与运行
 
-**无需安装**：仓库已构建的调试二进制位于 `target\debug\ramaria.exe`（仓库根下），包含全部命令（含 probe），直接执行即可。建议先 `cd` 到仓库根目录再运行，避免相对路径（默认数据库 `data/ramaria_assistant.db`）跑偏；也可创建 `ramaria.cmd` 快捷入口（内容：`@echo off` + `"%~dp0target\debug\ramaria.exe" %*`），之后在仓库根目录下直接敲 `ramaria`。
+### 1.1 发行安装包不随带 CLI
 
-### 关于发行安装包
+Releases 页面的 Windows 安装包（`Ramaria_<版本>_x64-setup.exe`）只包含桌面应用，不附带 `ramaria` 命令行，也不会写入 PATH。使用 CLI 需要从源码构建，或取得已构建的二进制。
 
-Releases 页面的 Windows 安装包（`Ramaria_<版本>_x64-setup.exe`）只包含桌面应用，不附带 `ramaria` 命令行程序，也不会向系统 PATH 写入任何内容。使用 CLI 请按下方说明从源码编译。
+### 1.2 从源码构建
 
-### 从源码编译
+前置要求：
+
+- Rust 1.88 及以上；
+- Windows 需要 Visual Studio Build Tools（MSVC 工具链）；
+- 无需 Node.js（前端构建不属于 CLI）。
 
 ```bash
-cd <仓库根目录>
+cd <仓库根目录>/main
 cargo build -p ramaria-cli
-# 调试二进制位于 target/debug/ramaria.exe
+# 调试二进制：target/debug/ramaria.exe
+# 发布构建：cargo build -p ramaria-cli --release
 ```
+
+把 `target\debug` 或 `target\release` 加入 PATH，或创建 `ramaria.cmd` 快捷入口：
+
+```bat
+@echo off
+"%~dp0target\debug\ramaria.exe" %*
+```
+
+### 1.3 建议先完成桌面首次配置
+
+**3.0 已知限制**：`ramaria setup` 会写入后端配置与凭据，但不会写入桌面首次配置的完成标记（`settings.setup_completed_at`）。如果这个库从未在桌面走完三步配置向导，`ask` / `chat` 会被状态门禁拒绝（提示尚未就绪）。
+
+因此，**全新库的首次使用请先在桌面应用完成配置向导**，再用 `--db` 指向同一个数据库：
+
+```bash
+ramaria --db "%APPDATA%\Ramaria\data\ramaria.db" status
+```
+
+只使用 CLI 完成首次配置并进行对话的 headless 场景暂不完整可用；导入、查询、导出等命令不受该门禁影响。该问题转 3.0.1 修复。已有桌面配置的库可以直接用 CLI 调整后端、导入、查询与导出。
 
 ---
 
-## 全局选项
+## 2. 全局约定
 
-所有子命令都支持以下全局选项：
+### 2.1 全局选项
 
 | 选项 | 说明 |
 |------|------|
-| `--db <PATH>` | 数据库文件路径。默认 `data/ramaria_assistant.db`，可通过 `RAMARIA_DB_PATH` 环境变量覆盖 |
-| `--json` | 全局 JSON 信封输出：stdout 仅输出 `{"ok":true,"data":…}` / `{"ok":false,"error":{...}}`，供脚本/agent 解析（遵循全局 JSON 信封约定） |
-| `--yes` | 自动确认所有确认点（隐私/删除/导入等）。非 TTY 且无 `--yes` 时不挂起、直接失败并提示 |
-| `--quiet` | 抑制 stderr 提示（info/success/warn），仅保留错误输出 |
-| `--skip-validate` | 跳过 LLM 后端连接验证（仅 `setup` 命令生效） |
+| `--db <PATH>` | 数据库文件路径。默认 `data/ramaria.db`（相对当前工作目录）；可用 `RAMARIA_DB_PATH` 覆盖。建议始终显式传入绝对路径。 |
+| `--json` | 全局 JSON 信封：stdout 仅输出 `{"ok":true,"data":…}` / `{"ok":false,"error":{…}}`。`setup` / `chat` 为交互式命令，不支持该选项。 |
+| `--yes` | 自动确认隐私、删除、导入等确认点；非 TTY 且未传 `--yes` 时不挂起，直接失败并提示。 |
+| `--quiet` | 抑制 stderr 的 info / success / warn 提示，仅保留错误输出。 |
+| `--skip-validate` | 跳过 LLM 连接验证，仅对 `setup` 生效。 |
+
+`--db` 是全局选项，建议放在子命令之前：
+
+```bash
+ramaria --db "C:\path\to\ramaria.db" memory l1
+```
+
+### 2.2 输出与退出码
+
+- stdout 只输出数据；状态、提示与警告走 stderr。
+- 文本模式适合人读；`--json` 适合脚本与 Agent。
+- 时间戳在 `--json` 中统一为 ISO-8601 UTC（如 `2026-10-27T08:00:00Z`）。
+- 退出码：
+
+| 退出码 | 含义 |
+|---|---|
+| `0` | 成功 |
+| `2` | 参数错误（clap） |
+| `3` | LLM / 嵌入 / 存储后端不可用（可重试类） |
+| `4` | 业务校验失败（参数不合法、隐私拒绝、`--results` 缺失等） |
+| `1` | 其它失败（配置、序列化、IO、导入格式等） |
+
+`ask --json` 是**事件流**，不是全局信封：每行一个 `{"type":"delta|done|error",…}`。流中出现错误事件时进程会以非零码退出，消费端不要只看事件行。
+
+### 2.3 环境变量
+
+| 变量 | 作用 |
+|---|---|
+| `RAMARIA_DB_PATH` | 覆盖 CLI 的 `--db` 默认值（显式 `--db` 优先）。 |
+| `RAMARIA_DATA_DIR` | 桌面应用的数据根目录；CLI 的 `persona reload` 也会在该目录下查找 `personas/`。它**不改变** CLI 的数据库路径。 |
+| `RUST_LOG` | 日志级别：`error` / `warn` / `info` / `debug` / `trace`，默认 `info`。 |
 
 ---
 
-## 子命令
+## 3. 快速开始
 
-### `ramaria setup` — 首次配置向导
+### 3.1 已有桌面配置的库
 
-运行交互式三步配置：选择 Provider → 填写 Base URL / API Key → 确认并保存。
+```bash
+# 探活：状态、provider、模型、数据库路径
+ramaria --db "%APPDATA%\Ramaria\data\ramaria.db" status
 
+# 单条提问
+ramaria --db "%APPDATA%\Ramaria\data\ramaria.db" ask "用一句话介绍你自己"
+
+# 交互式对话
+ramaria --db "%APPDATA%\Ramaria\data\ramaria.db" chat
+
+# 查看记忆
+ramaria --db "%APPDATA%\Ramaria\data\ramaria.db" memory l1
 ```
-ramaria setup
-ramaria setup --skip-validate    # 跳过 LLM 连接验证
+
+### 3.2 全新库
+
+请先在桌面完成配置向导，再按 3.1 使用。`ramaria setup` 仍可用于已有桌面配置的库（例如切换 provider、补充嵌入路径），但它不会替代桌面首次配置。
+
+### 3.3 常用任务
+
+```bash
+# 导入 QQ 聊天记录
+ramaria --db <库路径> import qq --file chat.json --deep
+
+# 续跑中断的导入后处理
+ramaria --db <库路径> import continue --export-root "C:\path\to\exports"
+
+# 导出会话
+ramaria --db <库路径> export markdown --output memories.md
+
+# 诊断导出
+ramaria --db <库路径> diagnostics --output diag.zip
 ```
-
-**流程**：
-1. 选择 LLM Provider：`lm-studio` / `deepseek` / `openai`
-2. 输入 Base URL（预填默认值）和 API Key（线上 provider 必填）
-3. 自动扫描 `personas/` 目录注册人格文件
-4. 可选 LLM 连接验证（检测后端连通性）
-5. 完成配置后标记状态为 Ready
-
-**注意**：
-- LM Studio 不需 API Key，但需手动启动 LM Studio 并加载模型
-- DeepSeek / OpenAI 的 API Key 保存在 OS keychain，不写入配置文件
-- 配置完成后，CLI 可立即进行对话
 
 ---
 
-### `ramaria ask` — 单条消息
+## 4. 命令参考
 
-发送单条消息并获取回复。默认流式输出。
+### 4.1 对话
 
+#### `ramaria setup` — 后端配置向导
+
+交互式四步：选择 Provider → 填 Base URL → 选填嵌入模型路径 → 线上 provider 填 API Key；随后初始化人格并刷新状态。
+
+```bash
+ramaria --db <库路径> setup
+ramaria --db <库路径> setup --skip-validate
 ```
+
+- 不支持 `--json`。
+- `--skip-validate` 跳过末尾的 LLM 连接验证；配置本身仍会保存。
+- 不写桌面首次配置完成标记，限制见 §1.3。
+- API Key 只进 Windows 凭据管理器，不写入 `config.toml`。
+
+#### `ramaria ask` — 单条消息
+
+```bash
 ramaria ask "今天天气怎么样"
 ramaria ask "介绍一下你自己" --persona rama-0001
-ramaria ask "你好" --session "abc-123"
-ramaria ask "用一行话解释什么是Rust" --no-stream
+ramaria ask "你好" --session <UUID>
+ramaria ask "用一行话解释什么是 Rust" --no-stream
 ramaria ask "今天心情如何" --json
 ```
 
 | 参数 | 说明 |
-|------|------|
-| `<MESSAGE>` | 用户消息文本（支持多词，无需引号也可） |
-| `--persona <UID>` | 指定对话人格（默认 `rama-0001`）。可用 `ramaria persona show` 查看可用人格 |
-| `--session <UUID>` | 复用已有会话 ID。不指定则自动创建新会话 |
-| `--no-stream` | 非流式输出：等待完整回复后一次性打印 |
-| `--json` | JSON 事件流输出：每行输出一个 StreamEvent JSON，包含 `request_id`/`delta`/`done`/`error` 字段 |
+|---|---|
+| `<MESSAGE>` | 用户消息，可多词。 |
+| `--persona <UID>` | 目标人格；不指定时用默认对话人格（缺省 `rama-0001`）。 |
+| `--session <UUID>` | 复用已有会话；不指定则新建。 |
+| `--no-stream` | 等待完整回复后一次性输出。 |
+| `--json` | 事件流输出；`--no-stream --json` 聚合为单个 `done`。 |
 
-**示例输出**（默认流式）：
-```
-🤖 助手 > 今天天气不错，挺风和日丽的。你打算出门吗？
-```
+默认流式；`||` 在文本模式下替换为换行。空回复按错误处理。
 
----
+#### `ramaria chat` — 交互式 REPL
 
-### `ramaria chat` — 交互式对话
-
-启动 REPL 交互模式，连续对话直到输入 `/exit`。
-
-```
-ramaria chat
+```bash
+ramaria --db <库路径> chat
 ```
 
-**内置命令**：
+| 内置命令 | 作用 |
+|---|---|
+| `/exit`、`/quit`、`/q` | 退出；退出时关闭活跃会话并触发 L1 摘要 |
+| `/save` | 保存并关闭当前会话，下一条消息自动开始新会话 |
+| `/clear` | 清屏（不会新建会话） |
+| `/help`、`/?` | 显示帮助 |
 
-| 命令 | 说明 |
-|------|------|
-| `/exit` 或 `/quit` | 退出对话 |
-| `/save` | 保存当前会话（自动关闭并触发 L1 摘要），开始新会话 |
-| `/clear` | 开始新会话（自动保存旧会话） |
-| `/help` | 显示帮助信息 |
+- 启动时创建新会话；空闲超过 `[session].l1_idle_minutes`（默认 10 分钟）后自动关闭并重建。
+- 与桌面不同，CLI REPL 退出会关闭活跃会话；桌面退出不会强制封存。
 
-**行为**：
-- 每次启动自动创建新会话
-- 会话结束时自动生成 L1 摘要（触发记忆管线 L0→L1→L2→L3 级联）
-- 后台空闲检测关闭 session 后，下次发消息自动创建新 session 并重试
-- 支持流式输出，逐字显示回复
-- 不使用 ratatui TUI（v1.1 仅简单 REPL）
+### 4.2 记忆
 
----
+#### `ramaria memory` — 查看分层记忆
 
-### `ramaria memory` — 记忆查看
-
-按层级查看系统记忆。
-
-```
-ramaria memory                    # 查看 L1 摘要（默认）
-ramaria memory l2                 # 查看 L2 事件
-ramaria memory events             # 层级别名：l2 ↔ events
-ramaria memory l3                 # 查看 L3 性格画像
-ramaria memory profile            # 层级别名：l3 ↔ profile
-ramaria memory --persona rama-0001  # 筛选特定人格
-ramaria memory --limit 20         # 限制返回条数
+```bash
+ramaria memory                    # 默认 L1
+ramaria memory l2                 # L2 事件
+ramaria memory events             # L2 别名
+ramaria memory l3                 # L3 画像
+ramaria memory profile            # L3 别名
+ramaria memory --persona rama-0001 --limit 20 --offset 0
 ```
 
-| 参数 | 说明 |
-|------|------|
-| `<LAYER>` | 记忆层级位置参数：`l1`/`summary`（摘要，默认）、`l2`/`events`（事件）、`l3`/`profile`（性格画像），层级别名双支持，未知层级有纠错提示 |
-| `--persona <UID>` | 按人格筛选 |
-| `--limit <N>` | 返回条数限制 |
-| `--offset <N>` | 跳过前 N 条（分页） |
+- 层级别名：`l1`↔`summary`、`l2`↔`events`、`l3`↔`profile`。
+- L1 时间行按**发生时间**显示；`--json` 条目含 `occurred_at`，并保留 `created_at`。
+- `--limit` 1–500；`--offset` 用于分页。
 
-**输出格式**：
-- **L1**：摘要卡片，含 `summary` / `atmosphere` / `valence` / `salience` / `situation_strength`；时间行按**发生时间**显示（v2.8），`--json` 条目新增 `occurred_at` 键（`created_at` 原键保留）
-- **L2**：事件列表，含 `title` / `confidence` / `keywords` / `attitude`
-- **L3**：性格标签表，含 `layer` / `trait` / `meaning` / `confidence`
+#### `ramaria blocks` — 话语块管理（`utt` 为别名）
 
----
-
-### `ramaria blocks` — 话语块管理（`utt` 为别名）
-
-管理原文话语块（utt）——会话消息按时间间隙 / 条数上限切分后的块，对话时检索注入【原文片段】。
-
-```
-ramaria blocks rebuild            # 重建全部会话的话语块（增量）
-ramaria blocks rebuild --force    # 先清空旧块再全量重切（切分参数变更后使用）
-ramaria utt rebuild               # 等价别名
+```bash
+ramaria blocks rebuild
+ramaria blocks rebuild --force
+ramaria utt rebuild
 ```
 
-| 子命令 | 说明 |
-|--------|------|
-| `rebuild` | 重建全部会话的话语块；`--force` 强制模式（先清空再全量重切），切分参数（`[utt].theta_gap_minutes` / `max_msgs_per_block`）变更后必须使用 |
+- `rebuild`：增量重建全部会话的话语块，并刷新检索索引。
+- `--force`：先清空全部旧块再按当前 `[utt]` 参数全量重切；修改切分参数后必须使用。
+- `[utt].enabled = false` 时跳过重建并返回空统计。
 
----
+#### `ramaria index` — 索引重建
 
-### `ramaria session` — 会话管理
-
-管理对话会话。
-
-```
-ramaria session list              # 列出所有会话
-ramaria session show <ID>         # 查看会话消息历史
-ramaria session delete <ID>       # 删除会话（关联消息与该会话的 L1 摘要随级联删除）
+```bash
+ramaria index rebuild
+ramaria index rebuild --json
 ```
 
-| 子命令 | 说明 |
-|--------|------|
-| `list` | 显示全部会话：ID、开始时间、结束时间、消息数。活跃会话标注"活跃" |
-| `show <ID>` | 按时间顺序展示该会话的全部消息（含 role 标记） |
-| `delete <ID>` | 删除会话，其关联消息与 L1 摘要按外键级联一并删除。**不可逆**，需交互确认 |
+- 在当前进程内同步重建 BM25、向量与图谱索引，完成后输出文档数与耗时（文档数为 L1 + L2，不含 utt 块）。
+- 3.0 已删除 `AppState::Indexing`；索引状态由 `IndexStatus` 单独表达。桌面端的重建是后台任务并发送 `index-progress`，CLI 这里是同步命令。
+- `--json` 输出 `doc_count` / `state` / `elapsed_ms`。
 
----
+### 4.3 数据
 
-### `ramaria config` — 配置管理
+#### `ramaria import` — 聊天记录导入
 
-查看和修改后端配置。
+只支持 QQChatExporter v6.x 导出的 JSON；TXT、PCQQ 与 Telegram 导出不在 3.0 范围。
 
-```
-ramaria config list               # 列出当前配置
-ramaria config get provider       # 查看当前 provider
-ramaria config set provider deepseek     # 切换后端（lm_studio / deepseek / openai）
-ramaria config set base_url https://api.deepseek.com/v1  # 修改 Base URL
-ramaria config set temperature 0.7       # 修改温度参数
-ramaria config set max_tokens 2048       # 修改最大输出 token
-```
-
-| 子命令 | 说明 |
-|--------|------|
-| `list` | 显示全部配置项（API Key 遮蔽显示为 `****`） |
-| `get <KEY>` | 查看单项配置（`provider` / `base_url` / `model_id` / `temperature` / `max_tokens` / `api_key` 等） |
-| `set <KEY> <VALUE>` | 修改配置项。支持：`provider` / `base_url` / `model_id` / `temperature` / `max_tokens` |
-
-**注意**：
-- API Key 不可通过 `config set` 修改（需使用 keychain）
-- 切换 provider 后，如为线上 provider，需重新确认隐私
-- 配置变更立即生效，无需重启
-
----
-
-### `ramaria persona` — 人格管理
-
-管理对话人格；v2.9 起支持预设导入 / 导出 / 提示词查看 / 推断接管。
-
-```
-ramaria persona list              # 列出人格（uid / 名称 / 类型 / 来源）
-ramaria persona show              # 显示所有的人格的名称/类型/状态
-ramaria persona reload            # 重新扫描 personas/ 目录并同步到数据库
-ramaria persona reload --uid rama-0001   # 仅重新加载指定人格
-ramaria persona import <file> [--dry-run] [--into <uid>] [--no-ai] [--json]
-ramaria persona export <uid> [--out <file>]
-ramaria persona prompt <uid> [--input <文本>]
-ramaria persona allow-inference <uid>
-```
-
-| 子命令 | 说明 |
-|--------|------|
-| `list` | 列出人格：UID、名称、类型（user/rama/char 等）、来源 |
-| `show` | 显示所有人格摘要 |
-| `reload` | 扫描 `personas/` 目录下所有 `.toml` 文件，同步名称/配置到数据库。新人格自动创建，已存在的跳过（幂等操作） |
-| `import` | 从预设文件导入人格（v2.9）：支持 `persona.toml` 超集与 SillyTavern 角色卡（`.json` / `.png`）。`--dry-run` 仅预览将写入项（不写库 / 不调 LLM）；`--into <uid>` 合并到已有人格（facts 判重 / traits 同 label 跳过 / examples 与规则追加）；`--no-ai` 关闭自由文本的 LLM 拆解（只保留原文）；`--json` 输出结构化结果 |
-| `export` | 导出人格为预设文件（v2.9）：缺省输出到 stdout，`--out <file>` 写文件、`-` 同 stdout。导出不含证据链、对话示例与会话原文 |
-| `prompt` | 查看该人格的 System Prompt（v2.9，只读）：缺省 / `--input` 为空显示静态段预览；`--input` 非空走完整装配（含记忆召回），不建会话、不写库、不调 LLM |
-| `allow-inference` | 允许推断管线接管该人格的 Manual 画像（v2.9）：把该人格 Active 的手工 trait 转回可推断更新；不写反馈日志 |
-
-
-**人格文件**：
-- 源码目录：`config/personas/*.toml`
-- 运行期目录：`%APPDATA%\Ramaria\personas\*.toml`
-- 文件名即为 persona UID（如 `rama-0001.toml` → UID `rama-0001`）
-- 用户可直接用文本编辑器编辑 `.toml` 文件，然后运行 `reload` 同步
-
----
-
-### `ramaria index` — 索引管理
-
-管理 BM25 和向量索引。
-
-```
-ramaria index rebuild             # 重建全部索引
-```
-
-- 读取所有 L1/L2 记忆 → 重建 BM25 倒排索引 + 图谱数据
-- 显示重建文档数、耗时
-- 索引版本不一致时应用会自动进入 Indexing 状态，也可手动触发
-
----
-
-### `ramaria import` — 聊天记录导入
-
-导入外部聊天记录到 Ramaria。
-
-```
-# 快速导入 QQ 聊天记录
+```bash
+# 快速导入：L0 + 图片理解 + L1
 ramaria import qq --file chat.json
 
-# 深度导入（含 L2 事件提取和 L3 性格推断）
+# 深度导入：再加 L2 事件与 L3 画像级联
 ramaria import qq --file chat.json --deep
 
-# 为导入的双方指定画像名称和 UID
+# 仅解析预览，不写库
+ramaria import qq --file chat.json --dry-run
+
+# 指定双方画像
 ramaria import qq --file chat.json \
   --persona-self-name "我的昵称" \
   --persona-other-name "对方昵称" \
   --persona-other-uid "char-123456789"
 
-# 跳过确认直接导入
-ramaria import qq --file chat.json --yes
-
-# 只处理对方消息（跳过"我方"侧，my persona 不创建）
+# 只处理某一侧
 ramaria import qq --file chat.json --side other
 ```
 
 | 参数 | 说明 |
-|------|------|
-| `--file <PATH>` | QQ 聊天记录文件路径（`.json`，QQChatExporter v6.x 导出格式；TXT / PCQQ 不在 2.0 范围） |
-| `--deep` | 深度导入模式：L0→L1→L2→L3 全管线 |
-| `--persona <NAME>` | 导出者画像名称（向后兼容，等同于 `--persona-self-name`） |
-| `--persona-self-name <NAME>` | 导出者画像名称 |
-| `--persona-self-uid <UID>` | 导出者画像 UID（默认自动生成，**我方 `user-` 前缀 / kind=user**，如 `user-123456789`） |
-| `--persona-other-name <NAME>` | 对方画像名称 |
-| `--persona-other-uid <UID>` | 对方画像 UID（默认 `char-` 前缀 / kind=char，如 `char-123456789`） |
-| `--side <self\|other\|both>` | 导入侧过滤，默认 `both`：`self` 只处理"我方"（导出者，kind=user）、`other` 只处理对方（kind=char）、`both` 全部处理；`*-uid` 前补 `user-`/`char-` 前缀也按侧归一 |
-| `--gap <MINUTES>` | 会话切割间隔（分钟），默认 10 |
-| `--yes` | 跳过诊断报告确认直接执行导入 |
+|---|---|
+| `--file <PATH>` | 导出 JSON 路径；支持中文路径。 |
+| `--deep` | 深度导入：L0 → 图片理解 → L1 → L2 → L3。 |
+| `--dry-run` | 只解析并输出结构化预览，不写数据库。 |
+| `--persona <NAME>` | 导出者画像名称（向后兼容，等同 `--persona-self-name`）。 |
+| `--persona-self-name <NAME>` | 导出者画像名称。 |
+| `--persona-self-uid <UID>` | 导出者 UID；缺省按 `user-` 前缀生成。 |
+| `--persona-other-name <NAME>` | 对方画像名称。 |
+| `--persona-other-uid <UID>` | 对方 UID；缺省按 `char-` 前缀生成。 |
+| `--side <self\|other\|both>` | 导入侧过滤，默认 `both`。 |
+| `--gap <MINUTES>` | 会话切割间隔，默认 10 分钟。 |
+| `--no-report` | 不输出解析报告（报告含导出者 / 对方标识，默认掩码版）。 |
+| `--force` | 跳过确认（等同 `--yes` 双保险）。 |
 
-**导入流程**：
-1. 解析聊天记录文件（JSON 格式，流式解析；TXT / PCQQ 不在 2.0 范围）
-2. 显示诊断报告：消息数量、时间范围、参与者信息
-3. 用户确认后执行导入：
-   - 为双方自动创建 persona（source=`qq`）
-   - 消息按发送者标记 `persona_uid`
-   - 快速模式：仅写入 L0 + 生成 L1 摘要
-   - 深度模式：L0→L1→L2→L3 全管线执行
-4. 导入完成后显示统计报告
+导入流程：解析 → 报告 → 确认 → L0 写入 → 导入后处理（图片理解 → L1 → 深度级联）。重复消息按导入指纹去重。图片理解能力不可达时附件保持待处理，可稍后续跑。
 
-**继续处理（v2.8）**：导入已完成但图片未理解 / 摘要缺失时（如导入中途中断、当时图片理解不可用），可续跑后处理：
+#### `ramaria import continue` — 续跑导入后处理
 
-```
-# 续跑：重扫未理解图片 + 补跑缺失摘要 + 补触发深度级联
-ramaria import continue --export-root "C:\Users\你\Documents\QQChatExporter\exports"
-
-# 多个导出目录（用于按图片指纹反查找回旧导出资源）
+```bash
+ramaria import continue --export-root "C:\path\to\exports"
 ramaria import continue --export-root "D:\exports" --export-root "E:\exports" --yes
-
-# 只处理当前待处理项，不重置历史"已跳过"附件
-ramaria import continue --no-reset-skipped
-
-# 限制本次处理数量 / 不触发深度级联
-ramaria import continue --limit 100 --no-cascade
-```
-
-| 参数（continue） | 说明 |
-|------|------|
-| `--export-root <PATH>` | 导出目录（可重复传入）；用于图片定位与按 md5 反查找回资源 |
-| `--no-reset-skipped` | 不重置历史"已跳过"的附件，只处理当前待处理项 |
-| `--limit <N>` | 本次最多处理的附件数 |
-| `--no-cascade` | L1 补跑后不触发深度级联（L2/L3） |
-
-> 可重复执行：已完成的图片理解与摘要会自动跳过；进度输出在 stderr，`--json` 信封同其他子命令。
-
-**支持的格式**：
-- **JSON**：QQChatExporter v6.x 导出格式（流式解析大文件；TXT / PCQQ 不在 2.0 范围）
-
----
-
-### `ramaria diagnostics` — 诊断导出
-
-导出诊断信息压缩包用于故障排查。
-
-```
-ramaria diagnostics
-ramaria diagnostics --output ./my-diagnostics.zip
-ramaria diagnostics --redact --output ./my-diagnostics.zip  # 兼容脚本统一传参
+ramaria import continue --no-reset-skipped --limit 100 --no-cascade
 ```
 
 | 参数 | 说明 |
-|------|------|
-| `--output <PATH>` | 输出文件路径（默认 `ramaria-diagnostics-{时间戳}.zip`） |
-| `--redact` | 统一脱敏开关：诊断导出始终脱敏，此开关为脚本统一传参兼容（幂等，可省略） |
+|---|---|
+| `--export-root <PATH>` | 导出目录，可重复传入；用于图片定位与按 md5 反查。缺省时跳过附件回补，仅补 L1 与级联。 |
+| `--no-reset-skipped` | 不重置历史「已跳过」附件，只处理当前待处理项。 |
+| `--limit <N>` | 本次最多补跑的会话数；`0` = 不限。 |
+| `--no-cascade` | L1 补跑后不触发 L2/L3 级联。 |
+| `--yes` | 跳过确认。 |
 
-**导出内容**：
-- 最近 1000 行日志（`ramaria.log`）
-- 配置文件（`config.toml`，API Key 已脱敏为 `[REDACTED]`）
-- Schema 版本信息
-- 操作系统信息（OS 名称、架构、内存等）
+可重复执行；已完成的图片理解与摘要会自动跳过。
 
-**安全保证**：
-- API Key 在导出文件中不出现（全部替换为 `[REDACTED]`）
-- 日志中的用户消息等敏感字段在打包时替换为字符数占位（`<N chars>`），不输出原文；绝对路径只保留文件名
-- 输出路径经过规范化校验：对父目录做 canonicalize 解析符号链接与相对路径，并拒绝根目录、盘符前缀等不安全的裸路径，防止路径穿越
+#### `ramaria export` — 导出会话
 
----
-
-### `ramaria status` — 应用状态探活
-
-只读输出应用状态、配置摘要与数据库路径，供脚本 / agent 探活（非 TTY 可执行）。
-
+```bash
+ramaria export                    # JSON，默认路径 exports/export_<时间戳>.json
+ramaria export markdown           # Markdown（也接受 md）
+ramaria export --persona rama-0001 --output ./memories.json
+ramaria export --redact --output ./redacted.json
 ```
+
+| 参数 | 说明 |
+|---|---|
+| `[format]` | 位置参数：`json` / `markdown` / `md`，默认 `json`。 |
+| `--persona <UID>` | 按人格筛选会话，并附加该人格的未吸收 L1 摘要段。 |
+| `--output <PATH>` | 输出路径；缺省 `exports/export_<时间戳>.<ext>`；`-` = stdout；裸文件名按当前目录处理。 |
+| `--redact` | 消息正文与 L1 摘要替换为 `<N chars>`，其余字段不变。 |
+
+**导出范围**：会话与消息；`--persona` 时附 L1 摘要。**不包含** L2/L3、知识事实、人格定义与向量。要完整备份，请复制 `ramaria.db` 与相关目录。
+
+### 4.4 管理
+
+#### `ramaria session` — 会话管理
+
+```bash
+ramaria session list --limit 20 --offset 0
+ramaria session show <UUID>
+ramaria session delete <UUID> --force
+ramaria session summarize <UUID> --progressive
+```
+
+| 子命令 | 说明 |
+|---|---|
+| `list` | 列出会话、时间、消息数；活跃会话单独标注。 |
+| `show` | 按时间顺序显示消息。 |
+| `delete` | 删除会话及其消息、关联 L1；不可逆，非 TTY 需 `--yes` 或 `--force`。 |
+| `summarize` | 为指定会话重新生成 L1；`--persona` 可选，`--progressive` 走渐进式重摘要（未触发阈值时回退单段）。 |
+
+#### `ramaria config` — 配置管理
+
+```bash
+ramaria config list
+ramaria config get provider
+ramaria config set provider deepseek
+ramaria config set base_url https://api.deepseek.com/v1
+ramaria config set temperature 0.7
+ramaria config set max_tokens 2048
+ramaria config set api_key sk-...
+ramaria config set embedding_model_path "D:\models\bge-small-zh-v1.5"
+ramaria config set utt.theta_gap_minutes 30
+```
+
+| 子命令 | 说明 |
+|---|---|
+| `list` | 显示后端配置、状态与 settings 表；API Key 遮蔽。 |
+| `get <KEY>` | 支持 `provider` / `base_url` / `model_id` / `temperature` / `max_tokens` / `api_key` / `state` / `embedding_model_path`，以及 `utt.*` / `bridge.*` 与 settings 键。 |
+| `set <KEY> <VALUE>` | 支持 `provider` / `base_url` / `model_id` / `temperature` / `max_tokens` / `api_key` / `embedding_model_path`，以及 `utt.*` / `bridge.*` 与已存在的 settings 键。 |
+
+- `api_key` 只写 Windows 凭据管理器，不落配置文件；本地 provider 会提示无需 API Key。
+- `utt.*` / `bridge.*` 走文件 + DB 双写；桌面端需重启应用。
+- 切换 provider 后，线上 provider 需重新完成隐私确认。
+
+#### `ramaria persona` — 人格管理
+
+```bash
+ramaria persona list
+ramaria persona show
+ramaria persona reload
+ramaria persona reload --uid rama-0001
+ramaria persona import preset.toml --dry-run
+ramaria persona import preset.json --into rama-0001 --no-ai
+ramaria persona export rama-0001 --out rama.toml
+ramaria persona export rama-0001 --with-examples
+ramaria persona prompt rama-0001
+ramaria persona prompt rama-0001 --input "今天有点累"
+ramaria persona allow-inference rama-0001 --label openness
+```
+
+| 子命令 | 说明 |
+|---|---|
+| `list` | 结构化列人格（uid / 名称 / kind / 来源），支持 `--limit` / `--offset`。 |
+| `show` | 显示全部人格摘要。 |
+| `reload` | 扫描 `personas/` 目录同步到 DB；`--uid` 只重载一个。 |
+| `import` | 导入 persona.toml 超集或 SillyTavern 卡（`.json` / `.png`）；`--dry-run` 预览、`--into` 合并、`--no-ai` 关闭自由文本拆解。 |
+| `export` | 导出人格为预设 TOML；默认不含对话示例，`--with-examples` 才包含真实示例。 |
+| `prompt` | 只读查看 System Prompt；缺省为静态段，`--input` 走含召回的全量预览。 |
+| `allow-inference` | 允许推断管线接管该人格的手工画像；`--label` 可重复，缺省全部。 |
+
+- 导入不保证 LLM 拆解成功：拆解失败或隐私未确认时，原文保留在人格配置里，人格照常建成。
+- 桌面端的人格文件在安装资源 `config/personas`；CLI `reload` 按 `RAMARIA_DATA_DIR/personas`、`config/personas` 的顺序探测。
+
+#### `ramaria rule` — 行为规则
+
+```bash
+ramaria rule list --persona rama-0001
+ramaria rule show 3
+ramaria rule import rules.json
+ramaria rule edit 3 --reaction "先共情再给建议" --avoid "敷衍,讲大道理"
+ramaria rule enable 3
+ramaria rule disable 3
+ramaria rule delete 3 --force
+ramaria rule evidence 3
+ramaria rule relearn --persona rama-0001
+ramaria rule clusters --persona rama-0001 --theta-nb 0.6
+```
+
+- `delete` 是 CLI 独有的破坏性操作；3.0 桌面规则页不提供删除与重新推断。
+- `edit` / `disable` 会写 `feedback_log`；`relearn` 重新聚类并替换 Auto 规则；`clusters` 只读，可用 `--theta-nb` / `--min-cluster-size` / `--beta1` / `--beta2` / `--theta-join` 做档位摸底。
+- 规则文本与证据链均为脱敏内容，不落原文。
+
+#### `ramaria fact` — 知识事实
+
+```bash
+ramaria fact list --persona char-0001 --field interests
+ramaria fact show 3
+```
+
+只读查询 active 事实与版本链；**不提供删除**（CLI 与桌面一致）。
+
+#### `ramaria keyword` — 关键词池
+
+```bash
+ramaria keyword list
+ramaria keyword show "加班"
+ramaria keyword seed "加班" "吐槽"
+ramaria keyword alias list
+ramaria keyword alias confirm "摸鱼"
+ramaria keyword alias reject "摸鱼"
+```
+
+`keyword_pool` 有三态：规范词 / 已确认别名 / 待确认别名。待确认别名由关键词建议用例登记，`alias list` 可能为空；`seed` 幂等，不递增使用次数。
+
+#### `ramaria style` — 表达层风格统计
+
+```bash
+ramaria style update --persona char-0001
+```
+
+基于该人格全部消息重算五维风格统计并生成 / 替换自动风格规则；样本不足时标注「数据不足」。
+
+#### `ramaria channel` — 社交通道维护
+
+```bash
+ramaria --db <库路径> channel status
+ramaria --db <库路径> channel bindings
+ramaria --db <库路径> channel bind qq c2c:10001 --persona rama-0001 --enable --allow-proactive
+```
+
+- `status`：总开关 / 平台开关 / WS 地址 / 凭据是否已配置；**运行连接态只在桌面可见**。
+- `bindings`：列出外部会话 ↔ 本机人格 / 启用 / 允许主动。
+- `bind`：写入或更新绑定；`--persona` 缺省保持现值，`--enable` / `--disable` 与 `--allow-proactive` / `--deny-proactive` 成对互斥。
+- 凭据不提供 CLI 明文入口，请在桌面「设置 → 社交与接入」填写；连接由桌面托管，CLI 不建立连接。
+
+#### `ramaria sticker` — 表情资产
+
+```bash
+ramaria --db <库路径> sticker add smile.png --description "开心" --tag 开心 --tag 摸鱼
+ramaria --db <库路径> sticker list
+ramaria --db <库路径> sticker update 1 --description "坏笑" --tag 摸鱼
+ramaria --db <库路径> sticker remove 1
+```
+
+- 资产文件复制到数据库同级的 `stickers/`；`remove` 同时删除文件。
+- 单张资产上限 20 MB；社交出站图片上限 8 MB；未命中降级为纯文字。
+- 本地对话不使用表情资产；Telegram 出站附件未实现（表情按文本占位降级）。
+- 3.0 没有表情管理界面，仅 CLI。
+
+#### `ramaria diagnostics` — 诊断导出
+
+```bash
+ramaria diagnostics
+ramaria diagnostics --output .\diag.zip
+ramaria diagnostics --redact --output .\diag.zip
+```
+
+- 打包最近 1000 行日志、`config.toml`、schema 信息与系统信息。
+- 始终脱敏：API Key 替换为 `[REDACTED]`；日志中的消息类字段替换为字符数；绝对路径只留文件名。
+- `--redact` 为脚本统一传参兼容，幂等。
+- 输出路径会做规范化与符号链接检查，拒绝根目录 / 盘符裸路径。
+
+### 4.5 高级
+
+#### `ramaria status` — 状态探活
+
+```bash
 ramaria status
 ramaria status --json
 ```
 
-**输出**：初始化状态、后端 provider / model、数据库路径、schema 与索引版本等摘要信息（不含 API Key 与记忆原文）。
+输出应用状态、provider、Base URL、模型、温度、最大输出 token、数据库路径与版本；不访问 LLM，不触发网络。
 
----
-
-### `ramaria export` — 数据导出
-
-导出记忆和对话数据。
-
-```
-ramaria export                    # 导出为 JSON（默认）
-ramaria export markdown           # 导出为 Markdown（也接受 md 别名）
-ramaria export --output ./my-memories.json  # 指定输出文件
-ramaria export --redact --output ./redacted.json  # 脱敏导出
-```
-
-| 参数 | 说明 |
-|------|------|
-| `[format]` | 导出格式：`json` / `markdown`（或 `md`），默认 `json`；位置参数 |
-| `--persona <UID>` | 按 persona_uid 筛选会话，并附加该人格的未吸收 L1 摘要段 |
-| `--output <PATH>` | 输出文件路径（缺省 `exports/export_{时间戳}.{json,md}`；`-` 表示输出到 stdout） |
-| `--redact` | 脱敏导出：消息正文与 L1 摘要替换为 `<N chars>`（字符数），其余字段不变；默认关闭 |
-
-**导出内容**：
-- **JSON**：带版本信封的结构化数据（`ramaria_export`：`version` / `exported_at` / `sessions[]`）— 会话含 `session_id` / `started_at` / `ended_at` / `messages[]`，消息含 `role` / `content` / `source` / `created_at`（UTC，`YYYY-MM-DD HH:MM`）；指定 `--persona` 时附加 `l1_memories` 摘要段（`persona_uid` / `count` / `items`）
-- **Markdown**：人类可读格式 — 按会话分组；跳过无消息会话，无可导出会话时提示且不写文件
-
----
-
-### `ramaria probe` — 探针实验（v1.5 M2 新增；v1.7 扩展）
-
-自动化工具链：构建测试集 + 按参数档位批量跑对话管线，用于 utt 参数定稿（θ_gap / 条数上限 / top_k）与聚类参数摸底、消融评估（M5a/M5b）。建立于 M1 `--json` 信封约定之上；v1.7 起探针规模扩展为 3 维、支持统计法（`--repeat`）与消融档位（`ablation` Profile）与消融对比报告（`report --ablation`）。utt 参数已定稿（θ_gap=10 / 条数 80 / top_k=3，写默认配置），定稿过程与结论见 `CHANGELOG.md`。
-
-#### `ramaria probe build` — 构建测试集（旧名 `probe dataset`，保留 alias）
-
-从导入数据自动构建测试集（3 维「语气模仿 tone / 事实记忆 fact / 情感表达 emotion」× 每维 10 题），输出结构化 JSON 数据集。
-
-```
-ramaria probe build --output probe-dataset.json
-ramaria probe build --persona char-0001 --questions-per-dim 15 --seed 42 --json
-ramaria probe build --source custom-source.json --output ds.json
-ramaria probe dataset --output ds.json        # 旧名 alias，等价
-```
-
-| 参数 | 说明 |
-|------|------|
-| `--persona <UID>` | 目标 persona（默认自动选白名单内角色类 persona，兜底 `char-0001`） |
-| `--questions-per-dim <N>` | 每维题数（默认 10，3 维共 30 题；需要更大规模评估时调大） |
-| `--seed <N>` | 抽样 seed（默认 `20260810`，固定可复跑：同 seed 输出相同测试集） |
-| `--source <FILE>` | 显式数据源文件（JSON：`{persona_uid, messages:[{question,reply,source_ref}], events:[{title,summary}]}`）；不指定则从数据库构建 |
-| `--output <FILE>` | 数据集输出文件（`-` = stdout）；不指定时 `--json` 输出完整数据集到 stdout |
-
-**降级**：数据库无真实数据 / 数据源文件处理失败时，自动以内置测试夹具数据兜底（记 warn，不报错），保证测试集恒有 `3 × 每维题数` 道题（tone / fact / emotion 三维各补齐到每维题数，真实数据在前，夹具补齐在后，每题 `source` 字段标注 `db`/`file`/`fixture`）。
-
-**档位组合**（代表配对，写进数据集供 run 使用）：
-
-| 档位 id | θ_gap（分钟） | 条数上限 | top_k | 说明 |
-|---------|:---:|:---:|:---:|------|
-| baseline | 30 | 40 | 3 | v3.1 初值（对照基准） |
-| theta_gap_60 | 60 | 40 | 3 | θ_gap 上调（块更长） |
-| max_msgs_80 | 30 | 80 | 3 | 条数上限上调（块更长） |
-| top_k_1 | 30 | 40 | 1 | top_k 下调（更保守的原文注入） |
-
-> 以上为 M1 utt 参数定稿实验的代表配对（v1.5 M2 遗留的对照档位）。utt 参数已定稿为 θ_gap=10 / 条数=80 / top_k=3（写默认配置）。**消融档位**（v1.7 M5 → v2.0 扩至 15 档）：数据集 `variants[]` 可含 `ablation` 字段（取值 `B0/B1/F0/F1~F4` 锚点与移除、`S_behavior/S_knowledge/S_expression/S_narrative` 替代对照、`I_behavior/I_knowledge/I_expression/I_narrative` 净增量对照），运行时对每档真实关闭/保留对应记忆注入层（`ablation` 缺失 = 完整体系，与 M1 行为一致）；其中 `I_*` 表示 B1 基座加单个专属层、`S_*` 表示去除 RAG 摘要仅保留单层。`ramaria probe` 无独立 profile flag——档位由数据集文件携带，供 `evaluate`/`report --ablation` 配对对比。
-
-#### `ramaria probe run` — 档位批量实验
-
-按档位批量跑对话管线，结构化输出（档位 → 输出 → 指标），供 v1.6 T2 自动评分与 v1.7 T3 正式评估复用。
-
-```
-ramaria probe run --dataset probe-dataset.json --output probe-results.json --json
-ramaria probe run --dataset ds.json --variants baseline,top_k_1 --limit 10 --json
-ramaria probe run --dataset ds.json --no-rebuild-utt --json
-```
-
-| 参数 | 说明 |
-|------|------|
-| `--dataset <FILE>` | 数据集文件（`probe build` 产物），必选 |
-| `--variants <ids>` | 只跑指定档位（逗号分隔 id，默认全部；无效 id 忽略） |
-| `--limit <N>` | 每档位最多跑题数（默认全部） |
-| `--rebuild-utt` / `--no-rebuild-utt` | 是否按档位参数重建 utt 块（默认开启；θ_gap/条数档位必须重建才生效。注意：开启会**清空并按新参数重建数据库中的 utt 块**） |
-| `--repeat <N>` | 统计法重复次数（v1.7 新增，默认 1）：同一档位跑 N 轮，输出含 `repeat.per_variant` 逐题统计与每轮 `rounds` 全量明细（供 evaluate 逐轮评分聚合）；`variants` 保留最后一轮单次快照。解决 DeepSeek 无 `seed` 复跑不一致（D-V17-001 统计法） |
-| `--output <FILE>` | 结果输出文件（`-` = stdout 输出原始结果 JSON） |
-| `--json` | M1 信封输出（`{"ok":true,"data":{…}}`） |
-
-**输出结构**（信封 `data`）：
-- `variants[]`：每档位 `variant_id` / `params`（三参数）/ `runs[]`（每题 `item_id` / `dimension` / `question` / `reply` / `metrics{reply_chars,elapsed_ms}` / `error`）/ `failed_count`
-- 单题失败不中断批量：失败题 `error` 记录原因，其余题与档位继续执行
-
-**注意**：
-- 线上 provider（DeepSeek/OpenAI）需要隐私确认，脚本场景加 `--yes`
-- 每次对话会新建会话并写库（探针实验数据）；建议对副本数据库执行
-- 隐私红线：日志不记录完整问题与回复；数据集含参考文本（persona 原回复/事件摘要），注意保管
-
-#### `ramaria probe evaluate` — 对档位实验自动评分（v1.6新增；v1.7 扩展）
-
-对 `probe run` 结果自动打分：事实维 golden answers（embedding 余弦 + 关键词命中加权）、语气维 LLM-as-judge（本地 LM Studio，rubric 1~5 分，温度 0，**线上后端自动跳过**）、情感维（v1.7 新增，确定性 rubric 0/0.5/1——情境极性 × 安慰/共情/喜悦标记计数，非事实召回）。服务于知识层抽取质量评估（漏报目标 <10%）与 v1.7 正式评估铺路。
-
-```
-ramaria probe evaluate --results probe-results.json --dataset probe-dataset.json --output eval.json --json
-ramaria probe evaluate --results probe-results.json --no-tone-judge --output eval.json
-```
-
-| 参数 | 说明 |
-|------|------|
-| `--results <FILE>` | 实验结果文件（`probe run` 产物），必选 |
-| `--dataset <FILE>` | 数据集文件（`probe build` 产物；提供时按 golden `reference` 精确评分，缺失退化为问题文本近似） |
-| `--variants <ids>` | 只评指定档位（逗号分隔 id，默认全部） |
-| `--output <FILE>` | 评分数值文件（`-` = stdout 输出评分 JSON） |
-| `--no-tone-judge` | 跳过语气维 LLM-as-judge（无本地 LM Studio 或想省时使用） |
-| `--json` | 信封输出（`{"ok":true,"data":{…}}`） |
-
-**输出结构**：`ProbeEvaluation`——档位 × 维度评分（`fact_score`/`tone_score`/`emotion_score`），逐题 `FactItemScore`（余弦/关键词命中/加权）；judge 不可用时 `judge_used=false` 标注，不阻断 fact 维评分。
-
-**逐轮聚合（v1.7）**：当 `probe run` 用了 `--repeat N` 且结果含 `repeat.per_variant[].rounds` 时，`evaluate` 对每轮 reply 分别评分，聚合为 `dimension_scores[].{mean,std,ci95_low,ci95_high,n}`（n=轮数，t 分布置信区间）；`variants`（最后一轮）保留为单次快照不参与聚合。无 repeat 的旧结果行为不变。
-
-> **exit code**：`probe evaluate` / `probe report` 缺 `--results` 时返回 **exit code 4**（业务校验失败，v1.7 由 1 修正）。
-
-#### `ramaria probe report` — 生成档位对比报告（v1.6新增；v1.7 消融对比）
-
-根据 evaluate 评分与人工抽检校准生成档位对比表与定稿建议（markdown/JSON 双形态，按输出扩展名 `.md`/`.json` 分派）。v1.7 起支持 `--ablation` 消融对比模式。
-
-```
-ramaria probe report --results probe-results.json --evaluation eval.json --output report.md
-ramaria probe report --results probe-results.json --evaluation eval.json --calibration manual.json --output report.json
-ramaria probe report --results probe-results.json --evaluation eval.json --ablation --output report-ablation.md
-```
-
-| 参数 | 说明 |
-|------|------|
-| `--results <FILE>` | 实验结果文件（`probe run` 产物），必选 |
-| `--evaluation <FILE>` | 评分数值文件（`probe evaluate` 产物） |
-| `--calibration <FILE>` | 人工抽检校准文件（JSON 数组 `{item_id, score}`；10%~20% 抽样与 judge 比对） |
-| `--output <FILE>` | 报告输出文件（`-` = stdout；`.md` markdown / `.json` JSON） |
-| `--ablation` | 消融对比报告模式（v1.7 新增，需提供 `--evaluation`，缺失 exit 4） |
-| `--json` | 信封输出 |
-
-**校准**：`read_manual_scores` 读取人工分数，`compute_calibration` 计算同分一致性 / 平均绝对差 / 偏差 / 校准系数；同分 <50% 或 `|偏差|>1.0` 时报告标注不一致，供人工复核。
-
-**`--ablation` 消融对比（v1.7）**：自动识别 F0（F 组）与 B1（S 组）基线，按题目配对执行 Wilcoxon 符号秩检验（正态近似、平均秩，n<5 返回 None 保守处理）+ Cohen's d + 95% CI + 全局 Benjamini-Hochberg FDR 校正；判定线 **p_fdr<0.05 ∧ |d|≥0.3 ∧ CI 不含 0 → 显著**（↑ 正向 / ↓ 负向 / → 无差异）；附辅助指标表（平均回复字符 / 耗时 / 空回复率）。对照档位由数据集 `variants[].ablation` 给出。
-
-#### `ramaria probe baseline` — 主动对话数值基线（v2.5 新增）
-
-只读查看主动对话的运行计数与配置口径快照（投递 / 回应 / 判据计数，按人格分组 + 按本地日期分桶），用于数值回归评估；**只读，不回写、不建表**。
-
-```
-ramaria probe baseline
-ramaria probe baseline --window-hours 0 --json
-```
-
-| 参数 | 说明 |
-|------|------|
-| `--window-hours <N>` | 回应统计窗口（小时；默认 24，`0` = 不设上界） |
-| `--json` | 信封输出（完整报告） |
-
-**口径**：投递 = 主动生成消息标记；回应 = 该人格会话中窗口内首条本地用户消息（排除导入与主动消息）；判据计数 = 运行状态中的 yes / no 计数；比率分母为 0 时显示 `-`。
-
----
-
-### `ramaria fact` — 知识层事实查询（v1.6新增）
-
-查看 persona 的知识事实（v3.1 §5 知识层）——从事件抽取并仲裁后的结构化事实，按 ProfileField 分组，含历史版本链。**仅查询命令，双端均无 delete**（D-V16-003）。
-
-```
-ramaria fact list                              # 列出默认 persona（rama-0001）的 active 事实
-ramaria fact list --persona char-0001 --json   # 指定 persona + JSON 信封
-ramaria fact list --field interests            # 按 field 过滤
-ramaria fact show 3                            # 查看事实 #3 详情（含版本链）
-```
-
-| 子命令 | 说明 |
-|--------|------|
-| `list` | 列出 persona 的 active 事实（按 field 分组：basic_info/personal_status/interests/social/history/recent_context/speaking_style）；`--persona` 过滤、`--field` 过滤、`--limit/--offset` 分页、`--json` 信封输出 |
-| `show <ID>` | 单条事实详情（content/confidence/source/keyword_hint）+ 完整版本链（`version_of` 历史版本折叠展示） |
-
-**事实卡片字段**：`field`（类别徽标）、`content`（事实陈述，**非原文**）、`confidence`、`source`（event/manual）、`keyword_hint`。仅展示 `status=active` 事实；历史版本沿 `version_of` 链查看。**无 delete 命令**（双端一致，D-V16-003）。
-
----
-
-### `ramaria rule` — 行为规则管理（v1.5 M5 新增）
-
-行为层（情境-反应规则）的管理命令：查看 persona 自动学习到的行为规则、手工导入、编辑/启用/禁用/删除，以及查看规则证据链（规则 → 事件 → 原文摘要溯源）。建立于 M1 `--json` 信封约定与 §2.9 动词词表之上；行为层设计对应算法说明书 v3.1 §4。
-
-```
-ramaria rule list                              # 列出默认 persona（rama-0001）的规则
-ramaria rule list --persona char-0001 --json   # 指定 persona + JSON 信封
-ramaria rule show 3                            # 查看规则 #3 详情
-ramaria rule import rules.json                 # 手工导入规则（JSON 文件，- = stdin）
-ramaria rule edit 3 --reaction "..." --avoid "a,b"
-ramaria rule enable 3 / ramaria rule disable 3
-ramaria rule delete 3                          # 破坏性操作：交互确认 / --yes 自动通过
-ramaria rule evidence 3                        # 规则 → 事件 → 原文摘要溯源链
-ramaria rule relearn                           # 全量行为学习：重新聚类并生成/替换 Auto 规则
-ramaria rule clusters --persona char-0001      # 统计行为聚类结构（只读：不写库、不调 LLM）
-```
-
-| 子命令 | 说明 |
-|--------|------|
-| `list` | 列出 persona 的行为规则（默认 `rama-0001`；`--persona` 筛选、`--limit/--offset` 分页，`--json` 输出含分页前 `total`） |
-| `show <ID>` | 查看单条规则详情（来源 Manual/Auto、状态、规则文本、情境关键词、情感强度/主动程度/详细度/正式度、禁忌列表、置信度/稳定性/证据数） |
-| `import <FILE>` | 手工导入规则 JSON（`-` = stdin），导入后 `source=Manual` 自动生效；宽松 situation 解析、空情境/空规则拒绝 |
-| `edit <ID>` | 编辑规则（`--reaction` / `--avoid`，至少一个；编辑后规则转为 Manual 并写 S1 反馈日志） |
-| `enable <ID>` / `disable <ID>` | 启用 / 禁用规则（disable 写 S1 反馈日志） |
-| `delete <ID>` | 删除规则（破坏性操作：交互确认，非 TTY 或 `--yes/--force` 自动通过） |
-| `evidence <ID>` | 展示规则证据链：规则 → 事件（title/摘要/paraphrase，脱敏字段，原文不落日志） |
-| `relearn` | 全量行为学习：基于 persona 全部事件重新聚类并生成 / 替换 Auto 规则（`--persona` 筛选） |
-| `clusters` | 统计行为聚类结构（只读：不写库、不调 LLM）；可用 `--theta-nb` / `--min-cluster-size` / `--beta1` / `--beta2` 等覆盖参数做档位摸底 |
-
-**手工导入 JSON 格式**（宽松解析，字段缺失取默认值）：
-
-```json
-{
-  "situation": {"keywords": ["工作", "加班", "吐槽"]},
-  "reaction": "遇到工作吐槽时，先共情再给实用建议",
-  "params": {"emotional_intensity": 0.6, "proactiveness": 0.5, "detail_level": 0.5, "formality": 0.3},
-  "avoid": ["敷衍安慰", "讲大道理"]
-}
-```
-
-**注意**：
-- 规则文本与 evidence 均为脱敏内容（paraphrase/摘要），原始对话不落日志（隐私红线）
-- 删除为破坏性操作，脚本场景加 `--yes` 或 `--force`
-- 编辑/禁用会写入 `feedback_log`（S1 强信号，weight=1.0），用于 v1.7 反馈环（H2）校准
-
----
-
-### `ramaria style` — 表达层风格统计（v2.0）
-
-手动补跑 persona 的表达层风格统计（五维统计 → 显著性检验 → 自动规则生成；用于覆盖无封存来源的导入 persona）。
-
-```
-ramaria style update                            # 默认 persona（rama-0001）
-ramaria style update --persona char-0001 --json
-```
-
-| 子命令 | 说明 |
-|--------|------|
-| `update` | 基于 persona 全部消息重算五维风格统计并生成 / 替换自动风格规则（受 `[style]` 配置组控制；样本量不足时标注"数据不足"不生成） |
-
----
-
-### `ramaria keyword` — 关键词词典管理（v2.0）
-
-管理 `keyword_pool` 关键词池（规范词 / 别名 / 待确认三态）与手工种子词。
-
-```
-ramaria keyword list                        # 列出全部词条
-ramaria keyword show "加班"                 # 查看单个词条详情
-ramaria keyword seed "加班" "吐槽"          # 手工注入规范词（幂等，不递增使用计数）
-ramaria keyword alias list                  # 列出待确认别名冲突
-ramaria keyword alias confirm "摸鱼"        # 确认别名合并（pending → alias）
-ramaria keyword alias reject "摸鱼"         # 驳回别名（pending → 独立规范词）
-```
-
-| 子命令 | 说明 |
-|--------|------|
-| `list` | 列出 keyword_pool 全部词条（含状态、使用次数、指向的规范词） |
-| `show <KEYWORD>` | 查看单个词条详情 |
-| `seed <KEYWORD>...` | 手工注入规范词（幂等：已存在保持现状，不递增 `use_count`）；种子词会参与 BM25 词典增强分词 |
-| `alias list` | 列出待确认的别名冲突（alias → 建议规范词） |
-| `alias confirm <ALIAS>` | 确认别名合并（pending → alias） |
-| `alias reject <ALIAS>` | 驳回别名（pending → 独立规范词，保留使用计数） |
-
-> 说明：别名体系当前以只读展示为主——生产侧尚无自动写入 `pending` 的路径（聚类建议落库未接线），`alias list` 可能为空；手工 `seed` 与别名确认/驳回均即时生效并持久化。
-
----
-
-### `ramaria mcp` — MCP 服务端（v2.1）
-
-以 stdio 启动 MCP 服务端，供外部对话前端（CodeBuddy / Trae / DeepSeek Harness 等）接入本系统的记忆与人格。
-
-```
-ramaria --db <库路径> mcp serve
-```
-
-- `mcp serve`：启动 stdio 服务端（七个工具：`memory_recall` / `chat_send` / `chat_ingest` / `persona_list` / `persona_get` / `chat_history` / `privacy_confirm`）；`--db` 须置于子命令之前。
-- 门禁与策略取自 `[mcp]` 配置组（默认关闭）：`enabled` / `allow_ingest` / `allow_seal` / `allowed_personas` / `allow_raw_text` / `max_items` / `max_chars`；配置在进程启动时读取，修改后需重连（重启）客户端侧连接。
-- stdout 仅承载协议消息，日志全部走 stderr；退出（传输关闭 / Ctrl+C）时优雅关停空闲检查与在途封存（最多等待 15 秒）。
-- 客户端配置片段（通用 `mcpServers` JSON 与 DeepSeek Harness 插件 patch）可在桌面「设置 → MCP 接入」一键复制。
-- `privacy_confirm`（v2.7 新增工具）：为当前线上后端记录隐私确认（按 provider + 服务地址粒度、幂等覆盖；本地 provider 调用为无操作；返回不含 API key）。
-
----
-
-### `ramaria channel` — 社交通道（v2.7）
-
-查看与维护社交平台（QQ / Telegram）配置与绑定。**连接由桌面应用托管**（随桌面启停），CLI 只做配置与绑定维护，不建立连接。
-
-```
-ramaria --db <库路径> channel status
-ramaria --db <库路径> channel bindings
-ramaria --db <库路径> channel bind <qq|telegram> <外部会话标识> [--persona rama-0001] [--enable|--disable] [--allow-proactive|--deny-proactive]
-```
-
-- `channel status`：通道配置摘要与凭据配置状态（总开关 / 平台开关 / WebSocket 地址 / 凭据是否已配置）；**运行连接态只在桌面侧可见**。
-- `channel bindings`：列出全部绑定（外部会话 ↔ 本机侧人格 / 启用 / 允许主动 / 时间戳）。
-- `channel bind`：写入或更新绑定（不存在则自动建档）；外部会话标识形如 `c2c:10001`（私聊）/ `group:123456`（群聊）；`--persona` 缺省保持现值，`--enable` / `--disable` 与 `--allow-proactive` / `--deny-proactive` 成对互斥。
-- 凭据（QQ access token / Telegram bot token）**不提供 CLI 明文传参入口**——请在桌面「设置 → 通道」填写（存 Windows 凭据管理器）；配置或凭据改动后需在桌面重新启停通道生效。
-- 接入步骤、风控声明与故障排查见 `desktop-user-guide.md`「社交平台接入」章节。
-
----
-
-### `ramaria sticker` — 表情资产管理（v2.9）
-
-管理 AI 可在社交对话中发送的表情图片（资产 = 图片文件 + 描述 + 场景标签）。管理器界面随后续前端改版，当前以命令行为准。
-
-```
-ramaria --db <库路径> sticker add <图片文件> [--description "..."] [--tag 开心] [--tag 晚安]
-ramaria --db <库路径> sticker list
-ramaria --db <库路径> sticker update <id> [--description "..."] [--tag ...]
-ramaria --db <库路径> sticker remove <id>
-```
-
-- 资产文件复制到数据目录的 `stickers/` 下（随数据目录自包含）；`remove` 同时删除资产行与文件；
-- **发送语义**：提示词向社交通道声明"可用 `[表情: 关键词]`"——出站时按标签（优先）/ 描述匹配资产，命中随回复发出；**未命中降级为纯文字**（指令段被剥离，不会原样发出）；出站图片上限 8MB；
-- 本地（桌面 / MCP）对话不使用表情资产，行为零变化；Telegram 出站附件当前未实现（登记观察）。
-
----
-
-## 环境变量
-| 变量 | 说明 |
-|------|------|
-| `RAMARIA_DATA_DIR` | 数据目录（覆盖默认 `%APPDATA%\Ramaria\`） |
-| `RAMARIA_DB_PATH` | 数据库文件路径（覆盖 `--db` 选项） |
-| `RUST_LOG` | 日志级别：`error` / `warn` / `info` / `debug` / `trace` |
-
----
-
-## 错误处理
-
-CLI 根据错误类型显示不同提示：
-
-| 错误类别 | 典型提示 |
-|----------|----------|
-| `Config` | 配置缺失或格式错误，请运行 `ramaria setup` |
-| `Storage` | 数据库不可用，请检查磁盘空间和权限 |
-| `Llm` | LLM 调用失败，可重试 |
-| `Privacy` | 线上 provider 需完成隐私确认 |
-| `Index` | 索引损坏，请运行 `ramaria index rebuild` |
-| `Validation` | 参数不合法（如 session 已关闭只读） |
-| `Io` | 文件读写失败 |
-| `Unsupported` | 不支持的导入格式 |
-
----
-
-## 快速开始示例
+#### `ramaria mcp` — MCP 服务端
 
 ```bash
-# 1. 首次配置（选择 LM Studio 本地模型）
-ramaria setup
-
-# 2. 快速提问
-ramaria ask "用一句话介绍自己"
-
-# 3. 交互对话
-ramaria chat
-
-# 4. 查看记忆
-ramaria memory l1
-
-# 5. 导入 QQ 聊天记录
-ramaria import qq --file chat.json --deep
-
-# 6. 导出诊断信息
-ramaria diagnostics --output diag.zip
-
-# 7. 导出数据
-ramaria export --format markdown --output memories.md
-
-# 8. 构建探针测试集（3 维 × 10 题，seed 固定可复跑）
-ramaria probe build --output probe-dataset.json
-
-# 9. 跑档位实验（默认 4 档位；--rebuild-utt 会按档位参数重建 utt 块）
-ramaria probe run --dataset probe-dataset.json --output probe-results.json --json
+ramaria --db "%APPDATA%\Ramaria\data\ramaria.db" mcp serve
 ```
 
+- 以 stdio 启动 MCP 服务端，七个工具：`memory_recall` / `chat_send` / `chat_ingest` / `persona_list` / `persona_get` / `chat_history` / `privacy_confirm`。
+- 门禁取自 `[mcp]`：`enabled`（默认关闭）/ `allow_ingest` / `allow_seal` / `allowed_personas` / `allow_raw_text` / `max_items` / `max_chars`。
+- stdout 只承载协议消息，日志走 stderr；退出时最多等待在途任务 15 秒。
+- `--db` 建议放在 `mcp` 之前；客户端配置片段可在桌面「设置 → 社交与接入 → MCP」一键复制。
+- 配置或凭据改动后需重启客户端连接。
+
+#### `ramaria probe` — 评估探针（开发者）
+
+探针用于离线评估，不参与日常使用。数据集与报告均为本地文件；`probe run` 会真实写库、真实调用 LLM。
+
+```bash
+ramaria probe build --output probe-dataset.json
+ramaria probe run --dataset probe-dataset.json --output probe-results.json --json
+ramaria probe evaluate --results probe-results.json --dataset probe-dataset.json --output eval.json
+ramaria probe report --results probe-results.json --evaluation eval.json --output report.md
+ramaria probe baseline --window-hours 24 --json
+```
+
+| 子命令 | 用途 | 关键参数 |
+|---|---|---|
+| `build` | 从导入数据构建三维测试集（语气 / 事实 / 情感） | `--persona` / `--questions-per-dim` / `--seed` / `--source` / `--output` |
+| `run` | 按档位批量运行对话管线 | `--dataset` / `--variants` / `--limit` / `--rebuild-utt` / `--no-rebuild-utt` / `--repeat` |
+| `evaluate` | 事实维 golden + 语气维本地 judge + 情感维 rubric | `--results` / `--dataset` / `--no-tone-judge` |
+| `report` | 档位对比 / 消融报告 | `--evaluation` / `--calibration` / `--ablation` |
+| `baseline` | 主动对话投递 / 回应 / 判据计数，只读 | `--window-hours`（`0` = 不限） |
+
+注意：
+
+- `--rebuild-utt` 会按档位参数清空并重建数据库中的 utt 块；建议对副本库运行。
+- `evaluate` 的语气维只在本地 LM Studio 上运行，线上后端自动跳过。
+- `probe run` 会真实写会话与消息；线上 provider 需隐私确认（`--yes`）。
+- `probe evaluate` / `report` 缺少 `--results` 时退出码为 `4`。
+
+探针的完整档位、消融与统计口径见项目技术报告（`对话-事件-人格画像系统技术报告`）。
+
 ---
 
-## 命令变更
+## 5. 数据与配置
 
-CLI 命名与输出约定变更（v1.5 起因"自动化友好改造"引入，后续版本持续追加），均保留旧命令兼容（clap alias），旧脚本不受影响：
+### 5.1 数据库与目录
+
+| 项 | CLI 默认 | 桌面默认 |
+|---|---|---|
+| 数据库 | `data/ramaria.db`（相对 CWD） | `%APPDATA%\Ramaria\data\ramaria.db` |
+| 配置 | 数据库同目录 `config.toml` | `%APPDATA%\Ramaria\data\config.toml` |
+| 日志 | stderr（CLI 不写桌面日志文件） | `%APPDATA%\Ramaria\data\logs\ramaria.log` |
+| 凭据 | Windows 凭据管理器 | Windows 凭据管理器 |
+
+- CLI 与桌面默认独立；用 `--db` 指向桌面库即可共享会话、记忆与人格。
+- `config.toml` 与 DB 双写，以文件为准；CLI 启动时会做一致性校验并回写 DB。
+- API Key 只进 Windows 凭据管理器，不写入 `config.toml`、不进入日志。
+
+### 5.2 3.0 重建库
+
+3.0 是单基线、无升级器：不读取 2.x 的 `assistant.db`，也不提供迁移命令。
+
+1. 备份旧库与 `config.toml`；需要时先 `export` / `diagnostics`。
+2. 删除目标 `ramaria.db`（或换 `--db` 路径）；首次启动自动按基线建库。
+3. 重新导入 QQ 记录，按需执行 `blocks rebuild` / `rule relearn` / `style update`。
+4. 核对消息、L1、L2、L3、知识与导入统计。
+
+> 2.x 的 `assistant.db` 可保留作备份，3.0 不会读取或删除。
+>
+> 若这是 CLI 首次接触该库，按 §1.3 先在桌面完成配置向导，CLI 的 `ask` / `chat` 才会放行。
+
+---
+
+## 6. 兼容与别名
 
 | 变更 | 说明 |
-|------|------|
-| `utt` → `blocks` | 话语块命令 canonical 名称改为 `blocks`（如 `ramaria blocks rebuild`），`utt` 保留为 alias |
-| `memory <层>` 层级别名 | 层级参数双支持：`l1`↔`summary`、`l2`↔`events`、`l3`↔`profile`；帮助与纠错提示同时列出 |
-| 全局 `--json` | 所有命令支持信封输出；`ask --json` 修复为合法 JSON 事件流（`{"type":"delta|done|error",…}`），`--no-stream` 聚合为单个 `done` 事件。注意：事件流中输出 `error` 事件时进程仍以 exit 0 退出（错误已内嵌于流），需消费端检查事件类型，勿仅依赖 exit code |
-| stdout/stderr 分离 | stdout 只输出数据；状态/提示/警告走 stderr（脚本依赖「stdout 混杂状态行」的需要调整） |
-| exit code 约定 | `0` 成功 / `2` 参数错（clap）/ `3` LLM 或后端不可用 / `4` 业务校验失败；`--json` 模式错误信封的 `error.code` 复用该约定 |
-| 时间戳约定 | `--json` 模式时间戳统一 ISO-8601 UTC（如 `2026-08-10T08:00:00Z`） |
-| `persona list` | 新增：结构化列出人格（uid/名称/kind/来源/状态），支持 `--limit/--offset` 分页 |
-| `status` | 新增：应用状态/配置摘要/DB 路径探活（agent 使用，非 TTY 可执行） |
-| `import qq --dry-run` | 新增：仅解析预览输出结构化 JSON 摘要，不写入数据库（agent 先验证数据源）。预览 JSON 含双方 QQ uin/uid 标识字段（数据源验证用途），注意其隐私属性 |
-| `session delete --force` | 新增：跳过确认（等同 `--yes` 双保险） |
-| `memory` 默认 persona | 修正：`user-0001` 硬编码 → `rama-0001`（缺陷修复，查询默认对象变化） |
-| `probe dataset` → `probe build` | **M2 新增探针命令**：`probe build`（构建测试集）/ `probe run`（档位批量实验），`dataset` 保留为 alias；详见上文 `probe` 章节 |
-| `rule list/show/import/edit/enable/disable/delete/evidence` | **v1.5 新增行为规则管理命令**（v1.5 仅后端 + CLI；桌面规则管理页已在 2.0 M7 实装，双端同源）；详见上文 `rule` 章节 |
-| `rule relearn/clusters` | **v2.0 新增**：`relearn` 触发全量行为学习（重新聚类并替换 Auto 规则）；`clusters` 只读统计聚类结构（可用 `--theta-nb` 等覆盖参数做档位摸底） |
-| `blocks` / `style` / `keyword` / `status` | **v2.0 新增命令面**：`blocks rebuild`（话语块管理，`utt` 为别名）、`style update`（风格统计补跑）、`keyword list/show/seed/alias`（关键词池与别名）、`status`（应用状态探活）；详见上文各章节 |
-| `probe` 档位扩展 | **v2.0**：消融档位增至 15 档（新增 `I_*` 真增量档）、数据集支持 `register` 语域双轨、报告新增 TOST 等效性检验与三口径事实维判据、`probe run` 写诊断有效性自检 |
-| `probe evaluate/report` | **v1.6 M4 新增探针评分命令**：`probe evaluate`（事实维 golden + 语气维 LLM-as-judge 自动评分）/ `probe report`（档位对比报告 + 定稿建议）；详见上文 `probe` 章节 |
-| `import qq --side` | **v1.6 M0 新增导入侧过滤**：`self\|other\|both`（默认 both），只处理某一侧时跳过侧消息不入库、该侧 persona 不创建（D-V16-011） |
-| `fact list/show` | **v1.6 M1 新增知识层查询命令**：查看 persona 结构化事实与版本链；**双端均无 delete**（D-V16-003）；详见上文 `fact` 章节 |
-| 默认画像 UID 语义 | **v1.6 M0 修正"我方/对方"数据库对齐（D-V16-011）**：新导入自动生成的"我方"画像 UID 前缀 `user-` / kind=user（对方仍 `char-` / kind=char）；旧库需按 v1.6 重建库升级路径，无数据回填 |
-| `probe run --repeat N` | **v1.7 M1 新增统计法**：同一档位多次运行取均值 ± 置信区间（D-V17-001，解决 DeepSeek 复跑不一致） |
-| `probe run --no-rebuild-utt` | **v1.7 M1 新增**：非切分档位复用已建 utt 块（embedding 调用数不随档位倍增） |
-| `probe build` 3 维 | **v1.7 M5a 扩展**：新增情感表达 emotion 维（qpd×3，30 题时共 90 题） |
-| `probe report --ablation` | **v1.7 M5a 新增消融对比报告**：配对 Wilcoxon + Cohen's d + CI + BH-FDR 判定 |
-| `probe evaluate/report` exit code | **v1.7 M1 修正**：`--results` 缺失时 exit code 由 1 修正为 4（业务校验失败语义） |
-| 风格规则注入 | **v1.7 M2 新增（A3）**：自动风格统计生成 SpeakingStyle 规则注入对话 prompt（`[style]` 配置，关闭回退 v1.6）；无需新 CLI 命令 |
-| 弱反馈闭环 | **v1.7 M4 新增（H2）**：S2/S3 弱信号检测写入 `feedback_log`（默认仅审计不自动改动）；无需新 CLI 命令 |
-| `import qq --file` 中文路径 | **v1.7 M0 修复**：文件路径参数改 `PathBuf`/`OsString` 承载，中文文件名导入冒烟通过 |
-| `mcp serve` | **v2.1 新增 MCP 服务端入口**：`ramaria mcp serve` 以 stdio 启动 MCP 服务端（v2.1 起六个工具，**v2.7 起七个**——新增 `privacy_confirm`，沿用全局 `--db`）；stdout 仅协议消息、日志走 stderr；桌面「设置 → MCP 接入」提供客户端配置片段，详见上文 `mcp` 章节 |
-| `probe baseline` | **v2.5 新增只读取数**：主动对话投递 / 回应 / 判据计数与配置口径快照（`--window-hours` 默认 24，`0` = 不限窗口）；只读、不回写、不建表。详见上文 `probe` 章节 |
-| `channel` | **v2.7 新增社交通道维护命令**：`status` / `bindings` / `bind`（连接由桌面托管，CLI 不建立连接）；子命令 19 → 20。详见上文 `channel` 章节 |
-| `persona import/export/prompt/allow-inference` | **v2.9 新增人格可编程命令**：预设导入（`--dry-run` / `--into` / `--no-ai` / `--json`）、画像导出（`--out`）、提示词查看（静态档 / `--input` 全量档）、推断接管；`persona` 动作 4 → **7**，顶层 20 不变。详见上文 `persona` 章节 |
-| `sticker` | **v2.9 新增表情资产管理**：`add` / `list` / `update` / `remove`（资产文件写入数据目录 `stickers/`；出站按 `[表情: 关键词]` 匹配，未命中降级纯文字）；顶层子命令 20 → **21**。详见上文 `sticker` 章节 |
+|---|---|
+| `utt` → `blocks` | canonical 名称是 `blocks`（如 `ramaria blocks rebuild`），`utt` 保留为别名。 |
+| `memory` 层级别名 | `l1`↔`summary`、`l2`↔`events`、`l3`↔`profile`。 |
+| `probe dataset` → `probe build` | `dataset` 保留为别名。 |
+| `--json` | 全局信封；`ask --json` 是事件流；`setup` / `chat` 不支持。 |
+| 导出参数 | 3.0 桌面导出参数改 camelCase（`outputPath`）；CLI 仍用 `--output`。 |
+| 库文件 | `assistant.db` → `ramaria.db`；不提供升级。 |
+| 索引状态 | 删除 `AppState::Indexing`；桌面用 `IndexStatus` + `index-progress`，CLI `index rebuild` 同步执行。 |
+| 线上记忆注入 | `[backend].online_memory_injection` 已删除；线上后端恒注入记忆。 |
+| 关键词层 | `[retrieval].enable_keyword_fuzzy` 独立控制关键词语义层；`enable_vector` 只控文档向量。 |
 
 ---
 
-## 版本升级与重建库
+## 7. 故障排查
 
-> **2.0 破坏性变更（D-V20-002）**：所有 migration 已合并为单个 `20260905_v2.0_schema.sql` 基线（**27 张表**，只 CREATE 不 ALTER），空库初始化即最终 schema。旧版数据库的 `_sqlx_migrations` 记录与该基线 checksum 不匹配，**无法自动迁移，需重建库**（备份 → 重建 → 重导 → 核对）。
-
-从 v1.7（及更早）升级到 2.0.0 的流程：
-
-1. **备份**：先备份旧库数据（如 `data/ramaria_assistant.db`），并导出诊断 / 记忆以防意外。
-2. **重建**：删除旧库文件，作为全新库启动（首次启动自动 `migrate!` 建 2.0 schema）。
-3. **重新导入**：重新导入外部聊天记录（`ramaria import qq --file ... [--side self|other|both]`），重新生成 L1/L2/L3、知识事实、行为规则与风格统计；导入后可跑 `ramaria blocks rebuild`（话语块）、`ramaria rule relearn`（行为规则）、`ramaria style update`（风格统计）补齐全链路。三层生成精确缓存（`llm_response_cache`，key 含模型 + 模板版本）可复用，大幅降低重新生成成本。
-4. **关键数据核对**：核对消息量、事件数、画像、知识事实与导入统计一致后投入使用。
-
-**升级后需检查的配置默认值变化**：
-
-- `[l1.progressive].enabled` 默认值由 `false` 转为 `true`（渐进式摘要 B3）：**存量 config.toml 中显式写有 `enabled = false` 的用户不跟随新默认**，需手动改为 `true` 或删除该行后重启；关闭可回退旧的分块行为。
-- `[injection_budget].enabled` 与 `[layer_dedup].enabled` 维持默认 `false`（实测不咬 / 结构性不可观测），无需改动。
-- 2.0 新增配置组已全部写入 `config/default.toml`（含 `[inference.confidence]`/`[inference.drift]`/`[inference.calibration]`/`[layer_dedup]` 等）；建议对照模板检查 `%APPDATA%\Ramaria\config.toml`。
-
-> **2.1 升级（无破坏性变更）**：仅新增一次增量 migration（`sessions` 增通道列与联合索引），旧库直接可用，无需重建；未开启 MCP 时行为与 2.0 一致。`[mcp]` 配置组默认关闭，在桌面「设置 → MCP 接入」中开启；MCP 服务端入口见上文 `ramaria mcp`。
-
-> 完整变更记录见 `CHANGELOG.md` 的 `[2.1.0]` / `[2.0.0]` 段。
+| 现象 | 处理 |
+|---|---|
+| `ask` / `chat` 提示尚未就绪 | 该库未完成桌面首次配置；先在桌面走完三步向导，或用已配置的库。见 §1.3。 |
+| `ramaria` 命令找不到 | 把 `target\debug` / `target\release` 加入 PATH；安装包不随带 CLI。 |
+| MCP 客户端没有工具 | 确认 `ramaria` 在 PATH；确认 `[mcp].enabled` 已打开；重启客户端。 |
+| MCP 召回为空 | 配置片段必须含 `--db` 桌面库路径；客户端工作目录不确定，缺省会打开另一份库。 |
+| 社交消息无回复 | 检查桌面通道是否启动、绑定是否放行；群聊需 @ 或回复；凭据改动后重新启停通道。 |
+| 导出报路径错误 | 裸文件名按当前目录处理；检查父目录是否存在、是否有写权限；拒绝根目录 / 盘符裸路径。 |
+| 导入解析失败 | 只支持 QQChatExporter v6.x JSON；先 `--dry-run` 验证数据源。 |
+| 索引重建很慢 | CLI 为同步全量重建；大库建议在桌面端用后台重建，或对副本库操作。 |
+| 探针结果缺失 | `probe evaluate` / `report` 缺 `--results` 返回 4；检查参数与文件路径。 |
 
 ---
 
-## 参考
+## 8. 参考
 
-- 桌面使用指南：`docs/desktop-user-guide.md`
-- 隐私说明：`docs/privacy-notice.md`
-- 默认配置模板：`config/default.toml`
+- [桌面使用指南](desktop-user-guide.md)
+- [隐私说明](privacy-notice.md)
+- [默认配置模板](../config/default.toml)
+- [新手引导](getting-started.md)
+- 问题反馈：[GitHub Issues](https://github.com/entergirl/Ramaria-s/issues)

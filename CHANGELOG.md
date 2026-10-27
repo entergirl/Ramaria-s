@@ -7,6 +7,74 @@
 
 ---
 
+## [3.0.0] - 2026-10-27
+
+### 版本定位
+
+**「整合收口」**：2.x 把能力堆到完整（记忆服务化、结构收敛、主动对话、社交接入、人格可编程），3.0 把这些能力收敛成一款**新用户能在 30 分钟内走通**的产品——索引与启动不再卡死、桌面端前端整体重写为 9 视图、三条接入路径写成可走通的文档，同批做完代码审查收敛与测试治理。**本版是破坏性版本**：数据库单基线重建、桌面端前端整体重写、旧 `assistant.db` 不再读取；发行 3.0.0（Windows x64，CPU 与 CUDA 两个安装包）。
+
+### 升级须知
+
+- **数据不通用（破坏性）**：3.0 使用新库文件 `data/ramaria.db`（单基线 migration、`schema_version=3`、29 表），2.x 的 `assistant.db` 不读取也不删除，**不提供升级器或迁移命令**；要保留旧内容请在 2.x 上自行导出，或备份旧数据目录。全新首启按配置向导重新选择后端与嵌入模型。
+- **桌面端前端整体重写（用户可见）**：改为 Vue 3 + Vite + TypeScript + Pinia 单份前端；界面即 3.0 观感——圆键导航（无侧边栏与页眉）、9 视图、浅深双主题、设置两级菜单、消息纯文本渲染 + 保留换行。
+- **配置键面变更**：删除 `[backend].online_memory_injection`（线上后端恒注入记忆）；`[channel].proactive_enabled` 更名为 `proactive_delivery_enabled`；新增 `[index].embed_batch_size`（默认 32）、`[index].l2_load_limit`（默认 0 = 不限）、`[retrieval].enable_keyword_fuzzy`（默认 `true`）。旧键残留不会报错，但不再生效（配置组 31 / 键面 190）。
+- **索引语义变化**：向量改为落库持久化（`memory_vectors` 表，覆盖 L1 / L2 / utt），启动只加载指纹匹配行、缺失在后台分批补算；`enable_vector=false` 收敛为「文档向量通道」开关，不再隐含关闭关键词语义层（由 `enable_keyword_fuzzy` 单独控制）。
+- **导出参数命名**：桌面导出命令参数统一 camelCase（`outputPath`），旧的 `output_path` 不再接受。
+
+### 新增功能
+
+- **统一索引与启动体验**：`memory_vectors` 持久化 + 启动加载 + 增量写入 + 后台补算；构建分批（`embed_batch_size`）、单批 30s 超时、逐批进度；新增 `IndexStatus`（idle / building / ready / degraded）、`get_index_status` 命令与 `index-progress` 事件；`rebuild_index` 改为「已启动」回执；首条消息在召回前落库，索引未就绪时按 BM25 + 图谱降级召回，界面显示构建横幅。
+- **桌面端 9 视图**：对话、记忆、人格、规则、导入、设置、调试 + 两个全屏视图（首次配置、错误页）；圆键导航（可拖动 / 5 个位置预设 / 方向翻转 / 键盘与 Esc）；状态覆盖加载、空、错误、降级与受限。
+- **记忆视图**：对话小结 / 重要事件 / 性格画像 / 知识四页签，按人格缓存、证据链可追溯、按事情发生时间展示、一键跳到对应会话。
+- **人格视图**：预设导入两段式（预览 → 写入）、导出（含「含对话示例」开关）、提示词查看器两档（静态段 / 全量含召回）、头像本地选图（中心裁方并压缩）、设默认、重载画像。
+- **规则视图**：人格筛选、双列卡片、详情内编辑与启停、证据链与参数区；不提供删除。
+- **导入视图**：四步向导（选择 → 预览 → 导入 → 完成）、解析预览与信息面板、阶段进度与 ETA、离开不中断、完成动作、「继续处理」续跑（配套 `open_directory_dialog` 与 `get_import_status`）。
+- **设置与调试视图**：两级菜单（基础 5 子页 12 卡 / 进阶 8 类 21 组）、按区块保存与恢复默认、深链 `#/settings/{tab}/{key}`、社交平台接入与 MCP 片段（含 `--db` 库路径）、隐私、数据管理、诊断与更新；调试视图只读展示关键词池、说话风格与评估产物。
+- **宿主接线**：托盘未读数字徽标、系统通知与通知点击跨视图定位、当前会话到达即已读、关闭确认（最小化 / 退出）、关于浮层（版本 / 仓库 / License / 检查更新 / 调试开关）。
+- **社交通道**：通道缺省人格跟随「默认对话人格」设置；新增 `clear_channel_credential` 清除平台凭据（幂等，只删 keychain 条目，运行中的通道需重新启停才按新状态连接）；空会话提供直接开口入口。
+- **命令面 73 → 85**：新增 `get_index_status` / `get_image_source_dir` / `set_image_source_dir` / `persona_export` / `open_file_dialog` / `set_vision_support` / `download_embedding_model` / `open_directory_dialog` / `get_import_status` / `get_default_config` / `get_proactive_stats` / `clear_channel_credential`。
+- **事件面 7 → 9**：新增 `index-progress`、`model-download-progress`（负载含 `failed` / `percent` / `elapsedMs`）。
+- **字段新增**：`SessionSummaryView` 增 `last_message_preview`（8 → 9）；`SessionMessageView` / 桌面 `MessageView` 增 `recalled_at`（10 / 9）；`SetupStatus` 增 `setup_completed`；`IndexStatusView` / `IndexProgress` 增 `failed`。
+- **目录与路径**：单一发图目录（默认 `{data_dir}/outgoing`，`send_local_image` 只接受该目录内文件）；导入 / 导出 / 预设路径改为「对话框选择即授权」的会话内票据制，文件形态与符号链接校验不变。
+- **新手引导**：`docs/getting-started.md` 截图版，覆盖本地对话 / MCP 接入 / 社交接入三条路径的前置、步骤与验证。
+- **配置**：`[index].l2_load_limit`（默认 0 = 全量分页加载，取消 1000 硬上限）、`[retrieval].enable_keyword_fuzzy`（关键词语义层独立开关）。
+- **嵌入与图片理解**：`set_vision_support` 单键写入（文件 + 库双写并热替换）；`download_embedding_model` 与下载进度事件（全局横幅，不阻塞其它操作）。
+
+### 变更
+
+- **界面**：侧边栏与页眉退场，导航改为常驻圆键；设置页由单页改为两级菜单并支持深链；关于信息由独立页改为浮层；索引状态由独立页改为横幅 + 设置卡片。
+- **消息渲染**：正文改为纯文本 + 保留换行（不再解析 Markdown），配合严格 CSP 换取零注入面；分条仍按 `||` 渲染多气泡。
+- **会话列表**：会话卡片按「今天 / 更早」分组，副行显示最后一条可见消息预览；「新建」不预落库，首次发送才创建。
+- **只读与导入横幅**：只保留一个动作「开始新对话」（不再提供平台跳转）。
+- **导出**：人格导出默认不含对话示例，需显式开启；开启时输出头提示「含真实对话片段」。
+- **错误与状态文案**：CLI 与桌面统一走 `error_hint` 映射；降级提示由视图内横幅 / 页内条 / 卡内标记承担（全局降级条本版未做，见发行说明「已知问题」）。
+
+### 修复
+
+- **索引卡死首启**：2.x 每次进程启动重建纯内存向量索引，大库首次对话长时间无响应；现改为落库持久化 + 启动加载 + 后台补算，构建中退出不丢用户消息。
+- **`bge-small-zh-v1.5` 嵌入失败**：批量与单条均报 mask 形状不匹配（`masked broadcast_mul`），此前靠逐条兜底降级；现按 padding 后序列长度对齐 mask，批量与单条均正常，保留 512 截断。
+- **utt 长块静默截断**：超过模型上限的话语块此前被静默截断，现按模型上限预截断并计数告警。
+- **CLI 裸文件名导出**：`export` / `diagnostics` 的 `-o out.json` 因空父路径 `canonicalize` 失败；现按当前目录处理。
+- **`config set` 回执过期**：打印的是变更前快照，现改为变更后重取。
+- **关键词语义层不受向量开关约束**：`enable_vector=false` 时仍会加载语义层权重；现由 `enable_keyword_fuzzy` 独立控制。
+- **OneBot 鉴权被拒后无限重连**：鉴权失败即停止重连并上报可读原因，不再刷日志与空转重试。
+- **图片描述折叠口径不一**：批量与单条描述按同一折叠归一规则处理，长描述支持多行展示与展开全文。
+- **安全与隐私批次**：导出目标符号链接拒绝；探针产物去绝对路径；LLM 错误按字符截断且不携带原文；媒体 / 发图 20 MB 流式上限；图谱通道按 persona / share 隔离；通道绑定日志脱敏。
+- **正确性与并发批次**：平台指纹含 `external_ref`；Telegram 纯附件与 caption @ 判定；RRF penalty 按实际可用通道计数；导入指纹去昵称前缀；后台构建 panic 复位；OneBot idle 超时；post 竞态改 CAS；`stop_channel` 限时；L1 补扫回收；多字节文本切片 panic（`mask_key`）；日志目录创建失败降级。
+
+### 工程与加固（内部结构，不改变用户可见行为）
+
+- **数据库整体化**：10 次增量 migration 折为单基线 `20261018_v3.0_schema.sql`；表 31 → 29（删 `pending_push` / `bm25_index` / `keyword_refs`，删 `utt_blocks.embedding`、`memory_events.indexed_at` / `index_version`、`background_jobs` 三列、`l2_cluster_fingerprints.created_at`、`schema_meta.index_version`，新增 `memory_vectors`）；列 259 / 显式索引 45 / 外键 28；库文件 `assistant.db` → `ramaria.db`。
+- **测试治理**：新增 dev-only `ramaria-testkit`（不随发行）——迁移驱动临时库、单份 `MockStorage`（160 方法）、mock LLM / 嵌入与领域夹具；删除 5 份重复 mock 实现（净 −4,753 行）；手写 DDL 归零；四层分工（单元 / 集成 / 契约 / 端到端）与七条写作规则落地；golden 快照按行为范围化。
+- **契约与结构**：命令表单一源 + 脚本机器校验（命令 / 子命令 / MCP 工具 / 事件 / 配置键 / schema 快照 / 前端结构）进 CI；Tauri 命令 85 与前端调用面 85 零漂移；结构自检阻断 0 / 建议 25 / 例外 2；`dead_code` 0、未用依赖 0、let-chains 0。
+- **代码收敛**：按只读审查的 53 条发现（P1 10 / P2 34 / P3 9）全量修复；重复实现合并与按职责拆分（含 `usecases_*` 门面瘦身、`channel.rs` 与 `ingest` 形态统一）；结构批次以 parity 零 diff 为证。
+
+### 测试
+
+分 crate 全绿（2026-10-27 实测）：`ramaria-core` 193、`ramaria-storage` 242（另 3 ignored）、`ramaria-testkit` 5、`ramaria-memory` 1538、`ramaria-llm` 89（`--features embedding-native` 100）、`ramaria-service` 829（`--features importer` 881；含 `suites` 6 / `parity` 18 / `entrypoints` 86 / `channel_memory_e2e` 2）、`ramaria-mcp` 20、`ramaria-channel` 235、`ramaria-importer` 84、`ramaria-cli` 354、`ramaria-desktop` 104；前端 Vitest 36 文件 / 393 例与生产 build 全绿；`clippy -j 2 --workspace -- -D warnings` 与 `fmt --all --check` 零问题；五项脚本全过（结构阻断 0 / 建议 25 / 例外 2，契约 85 / 85 / 21 / 7 / 9 / 9 / 1，配置 31 组 190 键，schema 快照一致，前端 9 视图）。全量 `cargo test --workspace` 由项目负责人执行。
+
+---
+
 ## [2.9.0] - 2026-10-17
 
 ### 版本定位

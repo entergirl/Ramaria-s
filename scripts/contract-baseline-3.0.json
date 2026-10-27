@@ -64,6 +64,7 @@
     "get_channel_status",
     "start_channel",
     "stop_channel",
+    "clear_channel_credential",
     "list_channel_bindings",
     "set_channel_binding",
     "list_rules",

@@ -62,6 +62,12 @@ desktop.ini
 # Python 脚本缓存（scripts/ 下为仓库工具，缓存不入库）
 /scripts/__pycache__/
 
+# scripts/ 本地工具（不入库，仅在本机工作区使用）：3.0 一次性治理的测试债务 /
+# 放大系数探针，与发布构建入口；仓库只保留门禁脚本与机器基线
+/scripts/check_test_debt.py
+/scripts/check_amplification.py
+/scripts/build_installer.py
+
 # 本地评测工具与产物统一落版本级测试目录 `.test-<版本>/`（含 tools/ 脚本；目录规则见上方 .test-*/）
 
 # 项目私有文档（开发、设计、决策）
