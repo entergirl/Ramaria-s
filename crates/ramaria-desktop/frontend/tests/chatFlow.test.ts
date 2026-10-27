@@ -18,7 +18,15 @@ import type { IndexStatusView } from '../src/core/api/dto'
 import { setTauriRuntime } from '../src/core/transport'
 import { useAppStore } from '../src/stores/app'
 import ChatView from '../src/views/chat/index.vue'
-import { callsOf, detail, installChatRuntime, message, summary } from './helpers/chatRuntime'
+import {
+  RAMA,
+  SELF,
+  callsOf,
+  detail,
+  installChatRuntime,
+  message,
+  summary,
+} from './helpers/chatRuntime'
 
 const Blank = { template: '<div />' }
 
@@ -408,6 +416,57 @@ describe('横幅', () => {
 
     expect(wrapper.find('.banner').attributes('data-kind')).toBe('llm')
     expect(wrapper.find('[data-degraded]').attributes('data-degraded')).toContain('llm')
+    wrapper.unmount()
+  })
+})
+
+describe('空对话入口', () => {
+  const ANIM = {
+    uid: 'anim-0001',
+    name: '小雨',
+    kind: 'anim',
+    source: 'manual',
+    ref_id: null,
+    avatar: null,
+    config: null,
+    description: null,
+    is_active: true,
+    created_at: 0,
+    updated_at: 0,
+  }
+
+  it('为空人格预留空对话，点击后按该人格新建会话并发送', async () => {
+    const runtime = installChatRuntime({
+      sessions: [],
+      settings: [{ key: 'default_persona_uid', value: 'rama-0001' }],
+      sessionDetail: detail('local', []),
+      commands: {
+        list_personas_full: () => [RAMA, SELF, ANIM],
+        create_session: () => summary({ id: 's2', persona_uid: 'anim-0001', message_count: 0 }),
+        send_message: () => 'req-draft',
+      },
+    })
+    const wrapper = await mountChat(freshPinia())
+
+    await wrapper.find('.avatar').trigger('click')
+    await flushPromises()
+    const row = wrapper.findAll('.session-row').find((node) => node.text().includes('小雨'))
+    expect(row).toBeTruthy()
+    expect(row?.text()).toContain('空对话')
+
+    await row?.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.chat-head').text()).toContain('小雨')
+
+    await wrapper.find('textarea').setValue('你好')
+    await wrapper.find('.composer .btn--primary').trigger('click')
+    await flushPromises()
+
+    expect(callsOf(runtime, 'create_session')[0]).toMatchObject({ personaUid: 'anim-0001' })
+    expect(callsOf(runtime, 'send_message')[0]).toMatchObject({
+      personaUid: 'anim-0001',
+      sessionId: 's2',
+    })
     wrapper.unmount()
   })
 })

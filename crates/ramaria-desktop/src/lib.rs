@@ -226,6 +226,7 @@ pub fn run() {
             commands::channel::get_channel_status,
             commands::channel::start_channel,
             commands::channel::stop_channel,
+            commands::channel::clear_channel_credential,
             commands::channel::list_channel_bindings,
             commands::channel::set_channel_binding,
             // ---- Rules（行为规则管理）----

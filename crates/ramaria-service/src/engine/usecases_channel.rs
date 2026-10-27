@@ -89,13 +89,15 @@ impl Engine {
         crate::channel::delete_binding(self, channel, external_ref).await
     }
 
-    /// 绑定生效人格：绑定级覆盖优先，其次通道级默认，再兜底默认人格。
+    /// 绑定生效人格：绑定级覆盖优先，其次通道级默认，再兜底默认对话人格。
     ///
     /// 返回:
-    /// - 生效的本机侧人格标识（trim 后非空；纯读，不访问存储）。
-    pub fn channel_effective_persona_uid(&self, binding: &ChannelBinding) -> String {
+    /// - 生效的本机侧人格标识（trim 后非空）；
+    /// - 默认对话人格取 `settings.default_persona_uid`（不可用时回退内置默认）。
+    pub async fn channel_effective_persona_uid(&self, binding: &ChannelBinding) -> String {
         let config = self.config();
-        crate::channel::effective_persona_uid(&config.channel, binding)
+        let fallback = self.default_persona_uid().await;
+        crate::channel::effective_persona_uid(&config.channel, binding, &fallback)
     }
 
     // =========================================================
@@ -125,6 +127,11 @@ impl Engine {
         platform: ChannelPlatform,
     ) -> RamariaResult<Option<String>> {
         crate::channel::load_credential(self, platform)
+    }
+
+    /// 清除平台凭据（幂等；运行中的通道需重新启停才按清除后的状态连接）。
+    pub fn channel_clear_credential(&self, platform: ChannelPlatform) -> RamariaResult<()> {
+        crate::channel::clear_credential(self, platform)
     }
 
     // =========================================================

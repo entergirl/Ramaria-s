@@ -16,9 +16,12 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
-import { personaApi, sessionApi } from '../core/api'
+import { configApi, personaApi, sessionApi } from '../core/api'
 import type { PersonaFull, SessionDetail, SessionSummary } from '../core/api/dto'
 import { errorMessage } from '../core/errors'
+
+/** 设置键：默认对话人格（人格页「设为默认对话人格」写入） */
+const SETTING_DEFAULT_PERSONA = 'default_persona_uid'
 
 export const useSessionStore = defineStore('session', () => {
   const items = ref<SessionSummary[]>([])
@@ -32,6 +35,14 @@ export const useSessionStore = defineStore('session', () => {
   const personasLoaded = ref(false)
   const personasError = ref('')
 
+  /** 默认对话人格 uid（来自设置，未做可用性校验） */
+  const defaultUid = ref<string | null>(null)
+  const defaultLoaded = ref(false)
+  const defaultError = ref('')
+
+  /** 草稿人格：尚未落库的新对话目标（会话抽屉「空对话」/「新建」） */
+  const draftPersonaUid = ref<string | null>(null)
+
   const personaMap = computed(() => {
     const map = new Map<string, PersonaFull>()
     for (const persona of personas.value) {
@@ -43,22 +54,36 @@ export const useSessionStore = defineStore('session', () => {
   /** 当前会话来源通道（无会话时按本地） */
   const activeChannel = computed(() => active.value?.channel ?? 'local')
 
-  /** 会话归属人格；未绑定时回退产品人格（kind = rama） */
-  const activePersona = computed<PersonaFull | null>(() => {
-    const bound = active.value?.persona_uid
-    if (bound && personaMap.value.has(bound)) {
-      return personaMap.value.get(bound) ?? null
-    }
-    return defaultPersona.value
-  })
-
-  /** 产品自身人格（未指定人格时的对话对象） */
+  /** 生效的默认对话人格：设置命中且可用 → 该人格；否则回退产品人格（kind = rama） */
   const defaultPersona = computed<PersonaFull | null>(() => {
+    const picked = defaultUid.value ? personaMap.value.get(defaultUid.value) : null
+    if (picked && picked.kind !== 'user' && picked.is_active) {
+      return picked
+    }
     return (
       personas.value.find((persona) => persona.kind === 'rama' && persona.is_active) ??
       personas.value.find((persona) => persona.kind === 'rama') ??
       null
     )
+  })
+
+  /** 草稿人格（uid 已失效时为空） */
+  const draftPersona = computed<PersonaFull | null>(() => {
+    const uid = draftPersonaUid.value
+    if (!uid) {
+      return null
+    }
+    const hit = personaMap.value.get(uid) ?? null
+    return hit && hit.kind !== 'user' ? hit : null
+  })
+
+  /** 会话归属人格；未绑定时回退草稿人格 → 默认对话人格 */
+  const activePersona = computed<PersonaFull | null>(() => {
+    const bound = active.value?.persona_uid
+    if (bound && personaMap.value.has(bound)) {
+      return personaMap.value.get(bound) ?? null
+    }
+    return draftPersona.value ?? defaultPersona.value
   })
 
   /** 用户本人人格（对话右侧「我」的头像与昵称来源） */
@@ -107,6 +132,32 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
+  /** 读取默认对话人格设置（可用性在 `defaultPersona` 计算时校验） */
+  async function loadDefault(force = false): Promise<void> {
+    if (defaultLoaded.value && !force) {
+      return
+    }
+    defaultError.value = ''
+    try {
+      const settings = await configApi.getSettings()
+      const hit = settings.find((item) => item.key === SETTING_DEFAULT_PERSONA)
+      defaultUid.value = hit && hit.value ? hit.value : null
+      defaultLoaded.value = true
+    } catch (failure) {
+      defaultError.value = errorMessage(failure, '默认人格读取失败')
+    }
+  }
+
+  /** 选择草稿人格（不落库；首次发送时才创建会话） */
+  function setDraft(uid: string | null): void {
+    draftPersonaUid.value = uid
+  }
+
+  /** 清空草稿人格（会话已建立或回到默认目标） */
+  function clearDraft(): void {
+    draftPersonaUid.value = null
+  }
+
   async function loadList(): Promise<void> {
     loadingList.value = true
     error.value = ''
@@ -141,6 +192,7 @@ export const useSessionStore = defineStore('session', () => {
       const summary = await sessionApi.create(personaUid)
       items.value = [summary, ...items.value]
       applySummary(summary)
+      clearDraft()
       return summary
     } catch (failure) {
       error.value = errorMessage(failure, '新建会话失败')
@@ -201,6 +253,11 @@ export const useSessionStore = defineStore('session', () => {
     personas,
     personasLoaded,
     personasError,
+    defaultUid,
+    defaultLoaded,
+    defaultError,
+    draftPersonaUid,
+    draftPersona,
     activeChannel,
     activePersona,
     defaultPersona,
@@ -211,6 +268,9 @@ export const useSessionStore = defineStore('session', () => {
     personaOf,
     loadPersonas,
     patchPersona,
+    loadDefault,
+    setDraft,
+    clearDraft,
     loadList,
     open,
     create,

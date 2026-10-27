@@ -57,7 +57,9 @@ watch(
   },
 )
 
-const tags = computed(() => sessionTags(session.active?.channel ?? 'local', persona.value))
+const tags = computed(() =>
+  sessionTags(session.active?.channel ?? 'local', persona.value, session.defaultPersona?.uid ?? null),
+)
 
 const statusText = computed(() => {
   if (chat.streaming) {

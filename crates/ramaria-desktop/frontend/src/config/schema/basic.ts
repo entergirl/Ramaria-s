@@ -107,7 +107,11 @@ export const BASIC_GROUPS: SettingGroup[] = [
     description: 'QQ 与 Telegram 通道的开关、默认人格与投递口径；平台凭据单独保存。',
     fields: [
       toggle(['channel', 'enabled'], '通道总开关', '关闭时不连接任何平台。'),
-      text(['channel', 'default_persona_uid'], '默认本机侧人格', '绑定未覆盖时生效。'),
+      text(
+        ['channel', 'default_persona_uid'],
+        '通道默认人格覆盖',
+        '留空跟随「默认对话人格」；填写后覆盖绑定未指定人格的外部会话。',
+      ),
       toggle(['channel', 'qq_enabled'], 'QQ 通道', '需通道总开关开启。'),
       text(['channel', 'qq_ws_url'], 'QQ 正向 WS 地址', 'NapCat 正向 WebSocket 地址。'),
       toggle(['channel', 'telegram_enabled'], 'Telegram 通道', '需通道总开关开启。'),

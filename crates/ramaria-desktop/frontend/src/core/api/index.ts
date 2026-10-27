@@ -422,6 +422,10 @@ export const channelApi = {
   stop() {
     return invoke<ChannelPanel>(COMMANDS.channel.stop)
   },
+  /** 清除平台凭据（删 keychain 条目；返回刷新后面板，运行中通道需重新启停） */
+  clearCredential(platform: string) {
+    return invoke<ChannelPanel>(COMMANDS.channel.clearCredential, { platform })
+  },
   listBindings() {
     return invoke<ChannelBinding[]>(COMMANDS.channel.listBindings)
   },

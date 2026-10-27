@@ -174,6 +174,16 @@ impl Engine {
         crate::settings::set(self, key, value).await
     }
 
+    /// 生效的默认对话人格（设置不可用时回退内置默认）。
+    ///
+    /// 用途:
+    /// - 本地对话未指定人格时的目标；
+    /// - 外部接入绑定未覆盖人格时的兜底；
+    /// - CLI / MCP 未提供人格时的默认。
+    pub async fn default_persona_uid(&self) -> String {
+        crate::settings::default_persona_uid(self).await
+    }
+
     /// 读取 DB 侧后端配置（`backend_config` 表）。
     ///
     /// 返回:

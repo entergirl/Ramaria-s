@@ -15,6 +15,7 @@ import { computed, onMounted, ref } from 'vue'
 
 import BaseButton from '../../../components/base/BaseButton.vue'
 import BaseInput from '../../../components/base/BaseInput.vue'
+import BaseModal from '../../../components/base/BaseModal.vue'
 import BaseSelect from '../../../components/base/BaseSelect.vue'
 import BaseSwitch from '../../../components/base/BaseSwitch.vue'
 import BaseTag from '../../../components/base/BaseTag.vue'
@@ -62,6 +63,8 @@ const cardError = ref('')
 const qqToken = ref('')
 const tgToken = ref('')
 const savingToken = ref('')
+const clearingToken = ref('')
+const clearTarget = ref<'' | 'qq' | 'telegram'>('')
 
 const runningText = computed(() => {
   if (!panel.value) {
@@ -72,6 +75,14 @@ const runningText = computed(() => {
 
 const channelStates = computed(() =>
   (panel.value?.channels ?? []).map((item) => `${item.channel} ${item.state}`).join(' · '),
+)
+
+/** 通道最近错误（仅错误态且有文案；鉴权拒绝等连接失败原因在此可见） */
+const channelErrors = computed(() =>
+  (panel.value?.channels ?? [])
+    .filter((item) => item.state === 'error' && item.lastError)
+    .map((item) => `${item.channel}：${item.lastError}`)
+    .join(' · '),
 )
 
 const personaOptions = computed<SettingOption[]>(() =>
@@ -128,6 +139,44 @@ async function saveToken(platform: 'qq' | 'telegram'): Promise<void> {
     cardError.value = errorMessage(cause, '凭据保存失败')
   } finally {
     savingToken.value = ''
+  }
+}
+
+/** 打开清除确认（仅对已配置的平台显示入口） */
+function askClear(platform: 'qq' | 'telegram'): void {
+  if (clearingToken.value) {
+    return
+  }
+  clearTarget.value = platform
+}
+
+/** 确认清除凭据：删 keychain 条目并以返回视图刷新面板 */
+async function confirmClear(): Promise<void> {
+  const platform = clearTarget.value
+  if (!platform || clearingToken.value) {
+    return
+  }
+  clearingToken.value = platform
+  cardError.value = ''
+  try {
+    panel.value = await channelApi.clearCredential(platform)
+    clearTarget.value = ''
+    if (platform === 'qq') {
+      qqToken.value = ''
+    } else {
+      tgToken.value = ''
+    }
+    pushToast({
+      tone: 'success',
+      message: panel.value.running ? '凭据已清除；重启通道后生效' : '凭据已清除',
+    })
+  } catch (cause) {
+    const message = errorMessage(cause, '凭据清除失败')
+    cardError.value = message
+    clearTarget.value = ''
+    pushToast({ tone: 'danger', message })
+  } finally {
+    clearingToken.value = ''
   }
 }
 
@@ -205,6 +254,8 @@ onMounted(() => {
       <BaseTag v-if="channelStates" tone="neutral">{{ channelStates }}</BaseTag>
     </template>
 
+    <p v-if="channelErrors" class="channel-error" role="alert">{{ channelErrors }}</p>
+
     <section class="extra">
       <h4 class="extra-title">平台凭据</h4>
       <div class="token-row">
@@ -224,6 +275,16 @@ onMounted(() => {
         >
           保存
         </BaseButton>
+        <BaseButton
+          v-if="panel?.qqTokenConfigured"
+          variant="ghost"
+          size="sm"
+          :loading="clearingToken === 'qq'"
+          :disabled="!!savingToken"
+          @click="askClear('qq')"
+        >
+          清除
+        </BaseButton>
       </div>
       <div class="token-row">
         <BaseInput
@@ -241,6 +302,16 @@ onMounted(() => {
           @click="saveToken('telegram')"
         >
           保存
+        </BaseButton>
+        <BaseButton
+          v-if="panel?.telegramTokenConfigured"
+          variant="ghost"
+          size="sm"
+          :loading="clearingToken === 'telegram'"
+          :disabled="!!savingToken"
+          @click="askClear('telegram')"
+        >
+          清除
         </BaseButton>
       </div>
     </section>
@@ -300,6 +371,26 @@ onMounted(() => {
       </BaseButton>
     </template>
   </SchemaGroupCard>
+
+  <BaseModal
+    :open="clearTarget !== ''"
+    :title="clearTarget === 'telegram' ? '清除 Telegram 凭据？' : '清除 QQ 凭据？'"
+    variant="danger"
+    :loading="clearingToken !== ''"
+    @close="clearTarget = ''"
+  >
+    <p class="modal-copy">
+      清除后该平台凭据会从系统凭据管理器删除，之后需要重新填写才能连接；配置与绑定不受影响。
+    </p>
+    <p class="modal-copy">正在运行的通道会沿用启动时的凭据，需重新启停才会按清除后的状态连接。</p>
+    <template #foot>
+      <span class="spacer" />
+      <BaseButton variant="ghost" :disabled="clearingToken !== ''" @click="clearTarget = ''">
+        取消
+      </BaseButton>
+      <BaseButton :loading="clearingToken !== ''" @click="confirmClear">清除</BaseButton>
+    </template>
+  </BaseModal>
 </template>
 
 <style scoped>
@@ -368,5 +459,32 @@ onMounted(() => {
   background: var(--danger-surface);
   color: var(--danger);
   font-size: var(--fs-small);
+}
+
+.channel-error {
+  margin: 0;
+  padding: var(--space-8) var(--space-10);
+  border: 1px solid var(--warn-line);
+  border-radius: var(--radius-tag);
+  background: var(--warn-surface);
+  color: var(--warn);
+  font-size: var(--fs-small);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.modal-copy {
+  margin: 0;
+  color: var(--text-1);
+  font-size: var(--fs-body);
+  line-height: 1.7;
+}
+
+.modal-copy + .modal-copy {
+  margin-top: var(--space-8);
+}
+
+.spacer {
+  flex: 1;
 }
 </style>

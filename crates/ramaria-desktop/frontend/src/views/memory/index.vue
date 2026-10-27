@@ -12,7 +12,7 @@
  * - 页内横幅（刷新进度 / 索引进度 / 部分失败）占位在工具栏与页签之间，内容态让到其下
  * - 人格卡与内容同属一个网格行，展开时内容整体右移，不覆盖卡片
  * - 详情在卡内展开且同时只开一张；切页签自动收起
- * - 页面自然滚动，长内容由工作台容器兜底
+ * - 页面定高 800×600：工具栏、横幅与页签固定，卡片区内部滚动并在上下边缘渐隐
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
@@ -23,6 +23,7 @@ import BaseProgress from '../../components/base/BaseProgress.vue'
 import BaseSkeleton from '../../components/base/BaseSkeleton.vue'
 import BaseChipNav from '../../components/base/BaseChipNav.vue'
 import BaseWorkbench from '../../components/base/BaseWorkbench.vue'
+import FadeScroll from '../../components/shell/FadeScroll.vue'
 import PersonaPicker from '../../components/shell/PersonaPicker.vue'
 import { parseL1Context } from '../../core/memory/context'
 import { displayPersonaName, orderFactGroups } from '../../core/memory/format'
@@ -150,7 +151,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <BaseWorkbench :ref="bindWorkbench">
+  <BaseWorkbench>
     <div
       class="memory"
       :data-view-state="viewState"
@@ -208,12 +209,15 @@ onBeforeUnmount(() => {
             />
           </div>
 
-          <div v-if="viewState === 'loading'" class="skeletons">
-            <BaseSkeleton v-for="index in 3" :key="index" shape="card" :lines="3" />
+          <div v-if="viewState === 'loading'" class="memory-state">
+            <div class="skeletons">
+              <BaseSkeleton v-for="index in 3" :key="index" shape="card" :lines="3" />
+            </div>
           </div>
 
           <BaseEmptyState
             v-else-if="viewState === 'error'"
+            class="memory-state"
             variant="blocked"
             :title="errorCopy.title"
             :description="errorCopy.description"
@@ -226,6 +230,7 @@ onBeforeUnmount(() => {
 
           <BaseEmptyState
             v-else-if="viewState === 'empty'"
+            class="memory-state"
             variant="action"
             :title="emptyCopy.title"
             :description="emptyCopy.description"
@@ -235,7 +240,7 @@ onBeforeUnmount(() => {
             </BaseButton>
           </BaseEmptyState>
 
-          <template v-else-if="store.data">
+          <FadeScroll v-else-if="store.data" :ref="bindWorkbench" class="memory-scroll">
             <div v-if="store.tab === 'l1'" class="panel">
               <MemoryL1Card
                 v-for="item in store.data.l1"
@@ -292,7 +297,7 @@ onBeforeUnmount(() => {
                 />
               </section>
             </div>
-          </template>
+          </FadeScroll>
         </div>
       </div>
     </div>
@@ -300,23 +305,36 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* 定高工作台：内容列内部滚动并渐隐，页面本身不参与外部滚动 */
 .memory {
   display: flex;
   flex-direction: column;
   gap: var(--gap-card);
   width: 100%;
-  max-width: var(--w-workbench);
+  max-width: 800px;
+  height: 600px;
+  max-height: calc(100vh - var(--space-40) * 2);
+  min-height: 0;
   margin: 0 auto;
 }
 
 .memory-split {
   display: grid;
+  flex: 1;
   grid-template-columns: 0 minmax(0, 1fr);
+  /* 显式单行定高：行高跟容器走，内容再长也不把行撑出定高框 */
+  grid-template-rows: minmax(0, 1fr);
   gap: 0;
   align-items: stretch;
+  min-height: 0;
   transition:
     grid-template-columns var(--dur-base) var(--ease-out),
     gap var(--dur-base) var(--ease-out);
+}
+
+/* 人格卡与内容列都在同一行高内自滚，不被内容撑破 */
+.memory-split > * {
+  min-height: 0;
 }
 
 .memory-split.is-open {
@@ -329,11 +347,27 @@ onBeforeUnmount(() => {
   grid-column: 2;
   flex-direction: column;
   gap: var(--gap-card);
+  height: 100%;
   min-width: 0;
+  min-height: 0;
+}
+
+/* 卡片区：定高工作台内的唯一滚动容器，上下边缘渐隐 */
+.memory-scroll {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 加载 / 空 / 错误态同样收在定高区内，不把页面撑高 */
+.memory-state {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .tabs {
   display: flex;
+  flex: none;
   justify-content: center;
 }
 
@@ -378,6 +412,7 @@ onBeforeUnmount(() => {
 /* 页内横幅槽位：工具栏与页签键之间，空时不占位 */
 .memory-banners {
   display: flex;
+  flex: none;
   flex-direction: column;
   gap: var(--space-8);
 }
@@ -480,7 +515,13 @@ onBeforeUnmount(() => {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  /* 窄窗改为上下两段：人格卡占约 42%，内容占其余高度，两者各自滚动 */
+  .memory-split {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
   .memory-split.is-open {
+    grid-template-rows: minmax(0, 0.42fr) minmax(0, 1fr);
     gap: var(--space-12);
   }
 

@@ -4,6 +4,7 @@
 //! - 启停 + 查询两组命令：运行时装配与互斥在 `channels` 模块，本层只做参数与视图映射
 //! - 启停失败降级为视图（running 状态如实回显），不上抛可恢复错误
 //! - 凭据只回显"是否已配置"（令牌明文永不进命令返回与日志）
+//! - 凭据清除只删 keychain 条目并返回刷新后面板（运行中通道需重新启停）
 //! - 绑定读写委托服务层用例；生效人格由服务层单点计算，桌面不重算
 
 use crate::DesktopState;
@@ -181,6 +182,35 @@ pub async fn stop_channel(state: State<'_, DesktopState>) -> Result<ChannelPanel
 }
 
 // =========================================================
+// clear_channel_credential — 凭据清除
+// =========================================================
+
+/// 清除平台凭据（删除 keychain 条目，幂等）并返回刷新后面板。
+///
+/// 参数:
+/// - `platform`: 平台名（`qq` / `telegram`）。
+///
+/// 说明:
+/// - 只删凭据，不动配置与绑定；运行中的通道持有启动时快照，需重新启停生效。
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn clear_channel_credential(
+    state: State<'_, DesktopState>,
+    platform: String,
+) -> Result<ChannelPanelView, String> {
+    let trimmed = platform.trim();
+    let Some(parsed) = ChannelPlatform::parse(trimmed) else {
+        return Err(format!("未知通道平台: {trimmed}"));
+    };
+    state
+        .engine
+        .channel_clear_credential(parsed)
+        .map_err(|e| crate::commands::service_error_message(&e, "清除通道凭据失败"))?;
+    tracing::info!(platform = %parsed.as_str(), "通道凭据已清除");
+    build_panel_view(state.inner()).await
+}
+
+// =========================================================
 // list_channel_bindings / set_channel_binding — 绑定读写
 // =========================================================
 
@@ -196,12 +226,11 @@ pub async fn list_channel_bindings(
         .await
         .map_err(|e| crate::commands::service_error_message(&e, "查询通道绑定失败"))?;
 
-    let views: Vec<ChannelBindingView> = bindings
-        .iter()
-        .map(|binding| {
-            binding_to_view(binding, state.engine.channel_effective_persona_uid(binding))
-        })
-        .collect();
+    let mut views: Vec<ChannelBindingView> = Vec::with_capacity(bindings.len());
+    for binding in &bindings {
+        let effective = state.engine.channel_effective_persona_uid(binding).await;
+        views.push(binding_to_view(binding, effective));
+    }
 
     tracing::debug!(count = views.len(), "list_channel_bindings 完成");
     Ok(views)
@@ -260,10 +289,8 @@ pub async fn set_channel_binding(
         allow_proactive = binding.allow_proactive,
         "通道绑定已保存"
     );
-    Ok(binding_to_view(
-        &binding,
-        state.engine.channel_effective_persona_uid(&binding),
-    ))
+    let effective = state.engine.channel_effective_persona_uid(&binding).await;
+    Ok(binding_to_view(&binding, effective))
 }
 
 // =========================================================

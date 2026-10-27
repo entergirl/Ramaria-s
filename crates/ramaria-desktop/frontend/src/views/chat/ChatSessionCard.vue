@@ -17,7 +17,9 @@ import BaseButton from '../../components/base/BaseButton.vue'
 import BaseSkeleton from '../../components/base/BaseSkeleton.vue'
 import BaseTag from '../../components/base/BaseTag.vue'
 import {
+  buildDraftRows,
   buildSessionRows,
+  filterDraftRows,
   filterSessionRows,
   groupSessionRows,
 } from '../../core/chat/sessionList'
@@ -27,6 +29,7 @@ import ChatAvatar from './ChatAvatar.vue'
 
 const emit = defineEmits<{
   select: [sessionId: string]
+  draft: [personaUid: string]
   create: []
   close: []
   retry: []
@@ -37,13 +40,20 @@ const now = useNow()
 const search = ref('')
 const searchInput = ref<HTMLInputElement | null>(null)
 
+const defaultUid = computed(() => session.defaultPersona?.uid ?? null)
 const rows = computed(() =>
-  buildSessionRows(session.items, (uid) => session.personaOf(uid), now.value),
+  buildSessionRows(session.items, (uid) => session.personaOf(uid), now.value, defaultUid.value),
+)
+const drafts = computed(() =>
+  buildDraftRows(session.personas, session.items, defaultUid.value),
 )
 
 const filtered = computed(() => filterSessionRows(rows.value, search.value))
+const filteredDrafts = computed(() => filterDraftRows(drafts.value, search.value))
 const groups = computed(() => groupSessionRows(filtered.value, now.value))
-const isEmpty = computed(() => filtered.value.length === 0 && !session.loadingList)
+const isEmpty = computed(
+  () => filtered.value.length === 0 && filteredDrafts.value.length === 0 && !session.loadingList,
+)
 const isFiltered = computed(() => search.value.trim() !== '')
 
 onMounted(() => {
@@ -127,6 +137,28 @@ function unreadText(count: number): string {
             <span class="row-meta">
               <span class="row-time">{{ row.timeText }}</span>
               <span v-if="row.unread > 0" class="row-badge">{{ unreadText(row.unread) }}</span>
+            </span>
+          </button>
+        </template>
+
+        <template v-if="filteredDrafts.length">
+          <p class="group-label">空对话</p>
+          <button
+            v-for="row in filteredDrafts"
+            :key="`draft:${row.uid}`"
+            type="button"
+            class="session-row"
+            @click="emit('draft', row.uid)"
+          >
+            <ChatAvatar :initial="row.initial" tone="brand" />
+            <span class="row-info">
+              <span class="row-name">
+                <span class="row-name-text">{{ row.name }}</span>
+                <BaseTag v-for="tag in row.tags" :key="tag.label" :tone="tag.tone">
+                  {{ tag.label }}
+                </BaseTag>
+              </span>
+              <span class="row-preview">{{ row.preview }}</span>
             </span>
           </button>
         </template>

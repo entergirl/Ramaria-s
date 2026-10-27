@@ -21,6 +21,7 @@ import type { JsonValue } from '../../../config/configTypes'
 import type { SettingField, SettingGroup, SettingOption } from '../../../config/schema/define'
 import { errorMessage } from '../../../core/errors'
 import { pushToast } from '../../../core/toast'
+import { buildMcpSnippet } from '../mcpSnippet'
 import SchemaGroupCard from '../SchemaGroupCard.vue'
 
 const props = withDefaults(
@@ -63,20 +64,9 @@ const optionOverrides = computed<Record<string, SettingOption[]>>(() => ({
 
 const combinedError = computed(() => props.error || cardError.value)
 
-const snippet = computed(() => {
-  if (!info.value) {
-    return ''
-  }
-  const config = {
-    mcpServers: {
-      ramaria: {
-        command: info.value.command,
-        args: ['mcp', 'serve'],
-      },
-    },
-  }
-  return JSON.stringify(config, null, 2)
-})
+const snippet = computed(() =>
+  buildMcpSnippet(info.value ? { command: info.value.command, dbPath: info.value.dbPath } : null),
+)
 
 const activityText = computed(() => {
   if (!info.value) {

@@ -15,8 +15,10 @@ import { mergeServerPage, appendMessage } from '../src/core/chat/merge'
 import { parseL1Receipt, parseSaveReceipt } from '../src/core/chat/receipt'
 import { canRecall, recallLabel } from '../src/core/chat/recall'
 import {
+  buildDraftRows,
   buildSessionRow,
   buildSessionRows,
+  filterDraftRows,
   filterSessionRows,
   groupSessionRows,
 } from '../src/core/chat/sessionList'
@@ -57,12 +59,20 @@ function message(patch: Partial<SessionMessage> = {}): SessionMessage {
 }
 
 describe('会话行', () => {
-  it('产品人格标默认，副行回退消息数', () => {
-    const row = buildSessionRow(summary(), RAMA, NOW)
+  it('默认对话人格标默认，副行回退消息数', () => {
+    const row = buildSessionRow(summary(), RAMA, NOW, 'rama-0001')
     expect(row.tags.map((tag) => tag.label)).toEqual(['默认人格'])
     expect(row.preview).toBe('12 条消息')
     expect(row.readonly).toBe(false)
     expect(row.initial).toBe('R')
+  })
+
+  it('默认标签跟随设置而不是人格类型', () => {
+    const anim = { uid: 'anim-0001', name: '小雨', kind: 'anim', source: 'manual' }
+    const tagged = buildSessionRow(summary({ persona_uid: 'anim-0001' }), anim, NOW, 'anim-0001')
+    expect(tagged.tags.map((tag) => tag.label)).toEqual(['默认人格'])
+    const plain = buildSessionRow(summary(), RAMA, NOW, 'anim-0001')
+    expect(plain.tags).toEqual([])
   })
 
   it('后端给出预览时优先展示预览', () => {
@@ -97,6 +107,45 @@ describe('会话行', () => {
   it('未读数不为负', () => {
     const row = buildSessionRow(summary({ unread: -3 }), RAMA, NOW)
     expect(row.unread).toBe(0)
+  })
+})
+
+describe('空对话', () => {
+  const ME = { uid: 'user-0001', name: '我', kind: 'user', source: 'manual', is_active: true }
+  const IMPORTED_CONTACT = {
+    uid: 'user-1001',
+    name: '小珊',
+    kind: 'char',
+    source: 'qq',
+    is_active: true,
+  }
+  const ANIM = { uid: 'anim-0001', name: '小雨', kind: 'anim', source: 'manual', is_active: true }
+
+  it('为没有进行中会话的人格预留空对话；本人与导入联系人不列', () => {
+    const drafts = buildDraftRows([ME, IMPORTED_CONTACT, ANIM], [], 'anim-0001')
+    expect(drafts.map((row) => row.uid)).toEqual(['anim-0001'])
+    expect(drafts[0].preview).toBe('空对话')
+    expect(drafts[0].tags.map((tag) => tag.label)).toEqual(['默认人格'])
+  })
+
+  it('已有本地会话的人格不列空对话（进行中与已结束都算入口）', () => {
+    const open = buildDraftRows([ANIM], [summary({ persona_uid: 'anim-0001' })], null)
+    expect(open).toHaveLength(0)
+    const closed = buildDraftRows(
+      [ANIM],
+      [summary({ persona_uid: 'anim-0001', ended_at: NOW })],
+      null,
+    )
+    expect(closed).toHaveLength(0)
+  })
+
+  it('停用的人格不列空对话；搜索按名称与 uid 过滤', () => {
+    const inactive = { ...ANIM, uid: 'oc-0001', name: '停用', is_active: false }
+    const drafts = buildDraftRows([ANIM, inactive], [], null)
+    expect(drafts.map((row) => row.uid)).toEqual(['anim-0001'])
+    expect(filterDraftRows(drafts, '小雨')).toHaveLength(1)
+    expect(filterDraftRows(drafts, 'anim-0001')).toHaveLength(1)
+    expect(filterDraftRows(drafts, '不存在')).toHaveLength(0)
   })
 })
 

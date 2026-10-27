@@ -177,7 +177,7 @@ pub(crate) async fn handle_event(
         );
         return;
     }
-    let persona = engine.channel_effective_persona_uid(&binding);
+    let persona = engine.channel_effective_persona_uid(&binding).await;
 
     // ---- 2. 图片段逐个下载（顺序与段序列一致） ----
     let mut images: Vec<Option<DownloadedImage>> = Vec::new();

@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/v2/crates/tauri-config-schema/schema.json",
   "productName": "Ramaria",
-  "version": "2.9.0",
+  "version": "3.0.0",
   "identifier": "com.ramaria.app",
   "build": {
     "devUrl": "http://localhost:1420",
@@ -46,6 +46,10 @@
       "../../config/personas/*.toml"
     ],
     "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": true
+      },
       "nsis": {
         "languages": ["SimpChinese"],
         "installMode": "currentUser",

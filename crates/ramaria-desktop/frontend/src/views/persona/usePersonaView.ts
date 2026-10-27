@@ -374,7 +374,7 @@ export function usePersonaView() {
 
   async function setDefault(): Promise<void> {
     const persona = active.value
-    if (!persona || defaultSaving.value || isDefault.value) {
+    if (!persona || persona.kind === 'user' || defaultSaving.value || isDefault.value) {
       return
     }
     defaultSaving.value = true

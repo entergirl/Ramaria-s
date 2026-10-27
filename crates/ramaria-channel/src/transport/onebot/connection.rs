@@ -3,6 +3,8 @@
 //! 设计特点:
 //! - 管理任务单点：连接建立 → 读循环（手动回 Pong / 心跳 Ping / 空闲超时）→
 //!   断连收尾 → 指数退避重连；关停信号随时可打断退避与读循环
+//! - 断开分两类：网络类按退避重连；协议端鉴权拒绝（无 `echo` 的 `retcode=1403`）
+//!   判为致命，上报原因并停止重连
 //! - 空闲按最后一个入站帧计时（心跳发出不续期），心跳间隔短于空闲阈值时判定仍生效
 //! - 读循环三类入站帧：`echo` 应答配对到待应答表；事件帧解析为规范事件；
 //!   Ping 手动回 Pong（不依赖底层自动机制）；Pong / Binary 忽略
@@ -26,6 +28,21 @@ use crate::config::QqRuntimeConfig;
 use crate::events::{ChannelEventSink, RecallNoticeSink};
 use crate::status::ConnectionState;
 use crate::{ChannelError, ChannelResult};
+
+// =========================================================
+// 读循环断开分类
+// =========================================================
+
+/// 读循环断开原因（决定是否继续重连）。
+///
+/// 字段约定:
+/// - `Retry`: 网络类断开，按指数退避重连；
+/// - `Fatal`: 凭据类拒绝（协议端鉴权不通过），重试无意义，上报后停止。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Disconnect {
+    Retry(String),
+    Fatal(String),
+}
 
 // =========================================================
 // 连接素材
@@ -156,7 +173,17 @@ pub(crate) async fn manage(
 
         match reason {
             None => return, // 关停信号：由 shutdown 置 Disconnected
-            Some(reason) => {
+            Some(Disconnect::Fatal(reason)) => {
+                tracing::warn!(channel = "qq", error = %reason, "OneBot 鉴权失败，停止重连");
+                update_status(
+                    &context.inner,
+                    context.sink.as_ref(),
+                    ConnectionState::Error,
+                    Some(reason),
+                );
+                return;
+            }
+            Some(Disconnect::Retry(reason)) => {
                 tracing::info!(channel = "qq", reason = %reason, "OneBot 连接断开，准备重连");
                 update_status(
                     &context.inner,
@@ -174,7 +201,7 @@ async fn run_connection(
     context: &ManagerContext,
     connection: Connection,
     shutdown_rx: &mut oneshot::Receiver<()>,
-) -> Option<String> {
+) -> Option<Disconnect> {
     let Connection {
         write_tx,
         mut write_rx,
@@ -200,18 +227,18 @@ async fn run_connection(
             _ = &mut *shutdown_rx => break None,
             _ = ping_tick.tick() => {
                 if write_tx.send(Message::Ping(Vec::new().into())).is_err() {
-                    break Some("连接已关闭".to_string());
+                    break Some(Disconnect::Retry("连接已关闭".to_string()));
                 }
             }
             _ = tokio::time::sleep_until(last_inbound + context.options.idle_timeout) => {
-                break Some("连接空闲超时".to_string());
+                break Some(Disconnect::Retry("连接空闲超时".to_string()));
             }
             incoming = read_half.next() => {
                 match incoming {
-                    None => break Some("连接已关闭".to_string()),
+                    None => break Some(Disconnect::Retry("连接已关闭".to_string())),
                     Some(Err(error)) => {
                         tracing::debug!(channel = "qq", error = %error, "OneBot 连接读取失败");
-                        break Some("连接读取失败".to_string());
+                        break Some(Disconnect::Retry("连接读取失败".to_string()));
                     }
                     Some(Ok(message)) => {
                         last_inbound = tokio::time::Instant::now();
@@ -232,37 +259,34 @@ async fn run_connection(
 // 入站帧处理
 // =========================================================
 
-/// 处理一帧入站消息；返回 `Some(原因)` 表示断开。
-fn handle_frame(context: &ManagerContext, message: Message) -> Option<String> {
+/// 处理一帧入站消息；返回 `Some(断开)` 表示结束本次连接。
+fn handle_frame(context: &ManagerContext, message: Message) -> Option<Disconnect> {
     match message {
-        Message::Text(text) => {
-            handle_text(context, text.as_str());
-            None
-        }
+        Message::Text(text) => handle_text(context, text.as_str()),
         Message::Ping(payload) => {
             let write_tx = { lock(&context.inner).write_tx.clone() };
             let Some(write_tx) = write_tx else {
-                return Some("连接已关闭".to_string());
+                return Some(Disconnect::Retry("连接已关闭".to_string()));
             };
             // 手动回 Pong（不依赖底层自动机制）
             if write_tx.send(Message::Pong(payload)).is_err() {
-                Some("连接已关闭".to_string())
+                Some(Disconnect::Retry("连接已关闭".to_string()))
             } else {
                 None
             }
         }
-        Message::Close(_) => Some("连接已关闭".to_string()),
+        Message::Close(_) => Some(Disconnect::Retry("连接已关闭".to_string())),
         // Pong / Binary / Frame 忽略
         _ => None,
     }
 }
 
 /// 处理一帧文本：`echo` 应答配对（成功应答同时记录平台消息 ID），
-/// 否则解析为入站事件投递。
-fn handle_text(context: &ManagerContext, text: &str) {
+/// 无 `echo` 时先判鉴权拒绝，否则解析为入站事件投递。
+fn handle_text(context: &ManagerContext, text: &str) -> Option<Disconnect> {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
         tracing::warn!(channel = "qq", "OneBot 上报帧 JSON 解析失败，忽略");
-        return;
+        return None;
     };
     let echo = value
         .get("echo")
@@ -283,7 +307,11 @@ fn handle_text(context: &ManagerContext, text: &str) {
                 "OneBot 应答未匹配到待处理调用（已超时或重复）"
             );
         }
-        return;
+        return None;
+    }
+    // 协议端在建连后以无 `echo` 的应答拒绝鉴权：凭据不通，重连无意义
+    if let Some(reason) = auth_rejection_reason(&value) {
+        return Some(Disconnect::Fatal(reason));
     }
     let sent_ids = { lock(&context.inner).sent_ids.clone() };
     if let Some(event) = super::event::parse_event(text, &sent_ids) {
@@ -293,6 +321,27 @@ fn handle_text(context: &ManagerContext, text: &str) {
             sink.on_recall(&notice);
         }
     }
+    None
+}
+
+/// 识别协议端的运行期鉴权拒绝（无 `echo` 的 `retcode=1403`）。
+///
+/// 规则:
+/// - 仅 `retcode == 1403` 判定为鉴权拒绝（NapCat：`token验证失败` 后关闭连接）；
+/// - 文案取协议端 `message`（缺失时用通用描述），不含本地凭据。
+fn auth_rejection_reason(value: &Value) -> Option<String> {
+    if value.get("retcode").and_then(Value::as_i64) != Some(1403) {
+        return None;
+    }
+    let message = value
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or("协议端拒绝连接");
+    Some(format!(
+        "鉴权失败：{message}（协议端 Token 与本地凭据不一致）"
+    ))
 }
 
 // =========================================================

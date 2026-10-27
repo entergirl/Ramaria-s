@@ -88,7 +88,7 @@ const CHAT: ParityViewChecklist = {
       status: 'covered',
       coverage: {
         file: 'chatSessions.test.ts',
-        cases: ['后端给出预览时优先展示预览', '产品人格标默认，副行回退消息数'],
+        cases: ['后端给出预览时优先展示预览', '默认对话人格标默认，副行回退消息数'],
       },
     },
     {

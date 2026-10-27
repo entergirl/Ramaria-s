@@ -172,7 +172,7 @@ async fn run_bind(
     let binding = engine
         .channel_set_binding(channel, external_ref, persona, enabled, allow_proactive)
         .await?;
-    let row = binding_row(engine, &binding);
+    let row = binding_row(engine, &binding).await;
 
     if json {
         return json::emit_ok(&row);
@@ -201,16 +201,21 @@ async fn load_binding_rows(engine: &Arc<Engine>) -> anyhow::Result<Vec<serde_jso
         .channel_list_bindings()
         .await
         .context("查询通道绑定失败")?;
-    Ok(bindings.iter().map(|b| binding_row(engine, b)).collect())
+    let mut rows = Vec::with_capacity(bindings.len());
+    for binding in &bindings {
+        rows.push(binding_row(engine, binding).await);
+    }
+    Ok(rows)
 }
 
 /// 单行绑定 → JSON 值（生效人格取服务层计算结果）。
-fn binding_row(engine: &Engine, binding: &ChannelBinding) -> serde_json::Value {
+async fn binding_row(engine: &Engine, binding: &ChannelBinding) -> serde_json::Value {
+    let effective = engine.channel_effective_persona_uid(binding).await;
     serde_json::json!({
         "channel": binding.channel,
         "external_ref": binding.external_ref,
         "persona_uid": binding.persona_uid,
-        "effective_persona_uid": engine.channel_effective_persona_uid(binding),
+        "effective_persona_uid": effective,
         "enabled": binding.enabled,
         "allow_proactive": binding.allow_proactive,
     })

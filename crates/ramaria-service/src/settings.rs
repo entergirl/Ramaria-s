@@ -14,7 +14,8 @@
 //! - 掩码不可逆：仅输出首尾少量字符，中间以 `****` 替代
 
 use ramaria_core::error::{RamariaError, RamariaResult};
-use ramaria_core::types::{BackendConfig, ChannelPlatform};
+use ramaria_core::privacy::mask_id;
+use ramaria_core::types::{BackendConfig, ChannelPlatform, PersonaKind};
 
 use crate::engine::Engine;
 
@@ -117,6 +118,62 @@ pub(crate) async fn backend_config(engine: &Engine) -> RamariaResult<Option<Back
 /// - 版本值非法时返回 `Storage` 错误（不静默回退）。
 pub(crate) async fn schema_version(engine: &Engine) -> RamariaResult<i32> {
     engine.storage_ref().get_schema_version().await
+}
+
+// =========================================================
+// 默认对话人格
+// =========================================================
+
+/// 设置键：默认对话人格 uid（人格页「设为默认对话人格」写入）。
+pub const SETTING_DEFAULT_PERSONA_UID: &str = "default_persona_uid";
+
+/// 解析生效的默认对话人格（本地对话 / 通道兜底 / CLI / MCP 共用）。
+///
+/// 规则:
+/// - `settings.default_persona_uid` 存在、trim 后非空，且人格存在、`kind != user`、
+///   处于启用态 → 采用该 uid；
+/// - 键缺失、为空、人格不存在 / 已停用 / 为 user 人格、读取失败 → 回退
+///   [`DEFAULT_PERSONA_UID`](crate::types::DEFAULT_PERSONA_UID)。
+pub(crate) async fn default_persona_uid(engine: &Engine) -> String {
+    match setting_default_persona(engine).await {
+        Some(uid) => uid,
+        None => crate::types::DEFAULT_PERSONA_UID.to_string(),
+    }
+}
+
+/// 读取并校验设置中的默认人格（不可用返回 None，仅记 warn）。
+async fn setting_default_persona(engine: &Engine) -> Option<String> {
+    let raw = match get(engine, SETTING_DEFAULT_PERSONA_UID).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(error = %error, "默认人格设置读取失败，回退内置默认");
+            return None;
+        }
+    };
+    let uid = raw
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    match engine.storage().get_persona_by_uid(uid).await {
+        Ok(Some(persona)) if persona.active && persona.kind != PersonaKind::User => {
+            Some(persona.uid)
+        }
+        Ok(_) => {
+            tracing::warn!(
+                persona = %mask_id(uid),
+                "默认人格不存在、已停用或为 user 人格，回退内置默认"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                persona = %mask_id(uid),
+                error = %error,
+                "默认人格校验失败，回退内置默认"
+            );
+            None
+        }
+    }
 }
 
 // =========================================================

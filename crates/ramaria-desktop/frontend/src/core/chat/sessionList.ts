@@ -28,6 +28,17 @@ export interface PersonaBrief {
   name: string
   kind: string
   source: string
+  /** 缺失按启用处理（旧调用方不带该字段） */
+  is_active?: boolean
+}
+
+/** 空对话行（尚未创建会话的人格入口） */
+export interface DraftRow {
+  uid: string
+  name: string
+  initial: string
+  tags: SessionTag[]
+  preview: string
 }
 
 /** 会话行（会话卡片的一行） */
@@ -106,13 +117,15 @@ export function sessionPreview(session: SessionSummary): string {
  * 参数:
  * - `channel`: 会话来源通道
  * - `persona`: 会话归属人格
+ * - `defaultUid`: 生效的默认对话人格 uid（用于「默认人格」标签）
  */
 export function sessionTags(
   channel: string,
   persona: PersonaBrief | null | undefined,
+  defaultUid: string | null = null,
 ): SessionTag[] {
   const tags: SessionTag[] = []
-  if (persona?.kind === 'rama') {
+  if (persona && defaultUid && persona.uid === defaultUid) {
     tags.push({ label: '默认人格', tone: 'brand' })
   }
   if (isImportedSession(persona)) {
@@ -135,14 +148,16 @@ export function sessionTags(
  * - `session`: 会话摘要
  * - `persona`: 会话归属人格（缺失时按无名会话渲染）
  * - `now`: 参考时间（毫秒）
+ * - `defaultUid`: 生效的默认对话人格 uid（默认标签判定）
  */
 export function buildSessionRow(
   session: SessionSummary,
   persona: PersonaBrief | null | undefined,
   now: number,
+  defaultUid: string | null = null,
 ): SessionRow {
   const name = sessionDisplayName(session, persona)
-  const tags = sessionTags(session.channel, persona)
+  const tags = sessionTags(session.channel, persona, defaultUid)
 
   return {
     session,
@@ -162,10 +177,72 @@ export function buildSessionRows(
   sessions: SessionSummary[],
   resolvePersona: (uid: string | null) => PersonaBrief | null | undefined,
   now: number,
+  defaultUid: string | null = null,
 ): SessionRow[] {
   return sessions
-    .map((session) => buildSessionRow(session, resolvePersona(session.persona_uid), now))
+    .map((session) => buildSessionRow(session, resolvePersona(session.persona_uid), now, defaultUid))
     .sort((a, b) => b.session.started_at - a.session.started_at)
+}
+
+// =========================================================
+// 空对话（人格入口）
+// =========================================================
+
+/** 构造单个人格的空对话行 */
+export function buildDraftRow(
+  persona: PersonaBrief,
+  defaultUid: string | null,
+): DraftRow {
+  return {
+    uid: persona.uid,
+    name: persona.name || persona.uid,
+    initial: (persona.name || persona.uid).slice(0, 1),
+    tags: sessionTags('local', persona, defaultUid),
+    preview: '空对话',
+  }
+}
+
+/**
+ * 构造空对话行集合。
+ *
+ * 规则:
+ * - 只列非 `user` 且处于启用态的人格（`user` 是本人，不承担对话职能）；
+ * - QQ 导入的联系人（`source = qq`）不列空对话：其会话按导入历史只读展示，
+ *   本地开新对话会把生成内容混进导入记录；
+ * - 已有本地会话（任意状态）的人格不列空对话：会话行本身就是入口，
+ *   已结束会话继续输入会自动另起新会话；
+ * - 按传入人格顺序输出（服务层列表顺序），默认人格标签跟随 `defaultUid`。
+ *
+ * 参数:
+ * - `personas`: 人格列表（全字段或摘要均可）
+ * - `sessions`: 现有会话摘要
+ * - `defaultUid`: 生效的默认对话人格 uid
+ */
+export function buildDraftRows(
+  personas: PersonaBrief[],
+  sessions: SessionSummary[],
+  defaultUid: string | null,
+): DraftRow[] {
+  const covered = new Set(
+    sessions
+      .filter((session) => session.channel === 'local')
+      .map((session) => session.persona_uid)
+      .filter((uid): uid is string => !!uid),
+  )
+  return personas
+    .filter((persona) => persona.kind !== 'user' && persona.is_active !== false)
+    .filter((persona) => persona.source !== 'qq')
+    .filter((persona) => !covered.has(persona.uid))
+    .map((persona) => buildDraftRow(persona, defaultUid))
+}
+
+/** 空对话行按名称过滤（与会话行同一搜索词） */
+export function filterDraftRows(rows: DraftRow[], keyword: string): DraftRow[] {
+  const needle = keyword.trim().toLowerCase()
+  if (!needle) {
+    return rows
+  }
+  return rows.filter((row) => `${row.name} ${row.uid}`.toLowerCase().includes(needle))
 }
 
 /** 关键词过滤：显示名 / 副行 / 时间 / 人格标识 / 会话短标识 */

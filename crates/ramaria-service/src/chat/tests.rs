@@ -110,6 +110,74 @@ async fn generates_reply_and_persists_both_messages() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 未指定人格：采用「默认对话人格」设置（CLI / MCP / 桌面共用同一口径）。
+#[tokio::test]
+async fn omitted_persona_uses_default_persona_setting() {
+    let (engine, storage, dir) = engine_with_l1_reply("chat-default-persona", REPLY).await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+    seed_persona(&storage, "anim-0001").await;
+    engine
+        .setting_set("default_persona_uid", "anim-0001")
+        .await
+        .expect("设置默认人格应成功");
+
+    let outcome = engine
+        .chat_send(ChatSendRequest {
+            message: "你好".to_string(),
+            persona: None,
+            session_id: None,
+            conversation_id: Some("client-default".to_string()),
+            channel: CHANNEL_MCP.to_string(),
+        })
+        .await
+        .expect("生成应成功");
+
+    let session = storage
+        .get_session(outcome.session_id)
+        .await
+        .expect("读取会话成功")
+        .expect("会话应存在");
+    assert_eq!(
+        session.persona_uid.as_deref(),
+        Some("anim-0001"),
+        "未指定人格时新会话应绑定默认对话人格"
+    );
+
+    let messages = storage
+        .list_messages(outcome.session_id)
+        .await
+        .expect("读取消息成功");
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.persona_uid.as_deref() == Some("anim-0001")),
+        "消息归属应与默认对话人格一致"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 默认人格设置为 user 人格 / 不存在：回退内置默认，不阻塞生成。
+#[tokio::test]
+async fn unusable_default_persona_falls_back_to_builtin() {
+    let (engine, storage, dir) = engine_with_l1_reply("chat-default-fallback", REPLY).await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+
+    for value in ["user-0001", "char-9999", "   "] {
+        engine
+            .setting_set("default_persona_uid", value)
+            .await
+            .expect("设置默认人格应成功");
+        assert_eq!(
+            engine.default_persona_uid().await,
+            DEFAULT_PERSONA_UID,
+            "不可用的默认人格应回退内置默认: {value}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 同一外部对话标识：续写同一会话（多轮累计消息）。
 #[tokio::test]
 async fn reuses_same_session_for_same_conversation_id() {

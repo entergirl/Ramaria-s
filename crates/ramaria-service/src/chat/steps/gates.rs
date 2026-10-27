@@ -9,9 +9,8 @@ use ramaria_core::types::{AppState, BackendConfig};
 
 use crate::engine::Engine;
 
-use super::normalize_persona;
-
-pub(super) fn step_validate<'a>(
+/// 校验消息与目标人格（未指定人格时取生效默认人格）。
+pub(super) async fn step_validate<'a>(
     engine: &Engine,
     message: &'a str,
     persona: Option<&str>,
@@ -21,7 +20,10 @@ pub(super) fn step_validate<'a>(
         return Err(RamariaError::validation("消息不能为空"));
     }
 
-    let persona = normalize_persona(persona);
+    let persona = match persona.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(uid) => uid.to_string(),
+        None => engine.default_persona_uid().await,
+    };
     let policy = engine.recall_policy();
     if !policy.persona_allowed(&persona) {
         tracing::warn!(persona = %persona, "生成请求的人格不在可见白名单内，拒绝");

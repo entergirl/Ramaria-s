@@ -155,7 +155,7 @@ pub(super) async fn prepare_request(
             normalize_persona(input.persona.as_deref()),
         )
     } else {
-        step_validate(engine, &input.message, input.persona.as_deref())?
+        step_validate(engine, &input.message, input.persona.as_deref()).await?
     };
 
     // ---- 2. 应用状态门禁（交互式；主动模式由调用方预检） ----

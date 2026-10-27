@@ -94,6 +94,8 @@ function installRuntime(payload: {
         switch (command) {
           case 'list_personas_full':
             return [RAMA, SELF]
+          case 'get_settings':
+            return []
           case 'list_sessions':
             return payload.sessions
           case 'get_session':

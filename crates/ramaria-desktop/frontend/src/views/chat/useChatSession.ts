@@ -100,13 +100,31 @@ export function useChatSession() {
     }
   }
 
-  /** 新建空白会话：清空当前会话，不落库 */
+  /** 新建空白会话：清空当前会话，目标人格取默认对话人格（不落库） */
   function startNewSession(): void {
     if (chat.streaming) {
       pushToast({ tone: 'warn', message: '正在生成回复，稍后再新建会话' })
       return
     }
     session.clearActive()
+    session.setDraft(session.defaultPersona?.uid ?? null)
+    chat.clear()
+    sessionsOpen.value = false
+  }
+
+  /**
+   * 打开某个「空对话」：以指定人格开启尚未落库的新会话。
+   *
+   * 参数:
+   * - `personaUid`: 目标人格 uid
+   */
+  function openDraft(personaUid: string): void {
+    if (chat.streaming) {
+      pushToast({ tone: 'warn', message: '正在生成回复，稍后再切换对话' })
+      return
+    }
+    session.clearActive()
+    session.setDraft(personaUid)
     chat.clear()
     sessionsOpen.value = false
   }
@@ -318,7 +336,13 @@ export function useChatSession() {
     }
     initialized.value = true
 
-    await Promise.all([session.loadPersonas(), session.loadList(), chat.loadPrivacy()])
+    // 每次进入对话都重取人格与默认人格：人格页可能刚导入新人格或改过默认
+    await Promise.all([
+      session.loadPersonas(true),
+      session.loadDefault(true),
+      session.loadList(),
+      chat.loadPrivacy(),
+    ])
 
     const fromView = Array.isArray(route.query.fromView)
       ? route.query.fromView[0]
@@ -342,6 +366,8 @@ export function useChatSession() {
       )
       if (latest) {
         await openSession(latest.id, false)
+      } else {
+        session.setDraft(session.defaultPersona?.uid ?? null)
       }
     }
 
@@ -384,6 +410,7 @@ export function useChatSession() {
     privacyDraft,
     init,
     openSession,
+    openDraft,
     startNewSession,
     send,
     retrySend,

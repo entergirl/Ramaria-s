@@ -207,34 +207,45 @@ async fn inputs_are_trimmed() {
 // 生效人格
 // =========================================================
 
-/// engine 门面：未覆盖回退通道默认；设置后用绑定值。
+/// engine 门面：绑定级 > 通道级 > 默认对话人格；设置后按绑定值。
 #[tokio::test]
 async fn effective_persona_uid_via_engine() {
     let (engine, storage, dir) = engine_with_db("channel-effective").await;
     seed_persona(&storage, "char-0001").await;
+    seed_persona(&storage, "char-0002").await;
 
     let uncovered = resolve_binding(&engine, "qq", "c2c:10001")
         .await
         .expect("建档应成功");
     assert_eq!(
-        engine.channel_effective_persona_uid(&uncovered),
+        engine.channel_effective_persona_uid(&uncovered).await,
         "rama-0001",
-        "未覆盖应回退通道默认"
+        "未覆盖且无设置时应回退内置默认"
     );
 
-    let covered = set_binding(&engine, "qq", "c2c:10001", Some("char-0001"), None, None)
+    engine
+        .setting_set("default_persona_uid", "char-0001")
+        .await
+        .expect("写入默认人格应成功");
+    assert_eq!(
+        engine.channel_effective_persona_uid(&uncovered).await,
+        "char-0001",
+        "通道级默认空白时应采用默认对话人格"
+    );
+
+    let covered = set_binding(&engine, "qq", "c2c:10001", Some("char-0002"), None, None)
         .await
         .expect("设置人格应成功");
     assert_eq!(
-        engine.channel_effective_persona_uid(&covered),
-        "char-0001",
+        engine.channel_effective_persona_uid(&covered).await,
+        "char-0002",
         "绑定级人格应优先"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 纯函数：绑定级 → 通道级 → 默认人格的三级回退与 trim 归一。
+/// 纯函数：绑定级 → 通道级 → 默认对话人格 → 内置默认的回退与 trim 归一。
 #[test]
 fn effective_persona_uid_fallback_chain() {
     let binding = |persona: Option<&str>| ChannelBinding {
@@ -254,26 +265,31 @@ fn effective_persona_uid_fallback_chain() {
 
     // 绑定级覆盖（含 trim）
     assert_eq!(
-        effective_persona_uid(&config("rama-0001"), &binding(Some("  char-0007  "))),
+        effective_persona_uid(
+            &config("rama-0001"),
+            &binding(Some("  char-0007  ")),
+            "char-0009"
+        ),
         "char-0007"
     );
     // 未覆盖 → 通道级默认
     assert_eq!(
-        effective_persona_uid(&config("char-0002"), &binding(None)),
+        effective_persona_uid(&config("char-0002"), &binding(None), "char-0009"),
         "char-0002"
     );
     // 绑定级空白 → 视为未覆盖
     assert_eq!(
-        effective_persona_uid(&config("char-0002"), &binding(Some("   "))),
+        effective_persona_uid(&config("char-0002"), &binding(Some("   ")), "char-0009"),
         "char-0002"
     );
-    // 通道级默认空白 → 兜底默认人格
+    // 通道级默认空白 → 默认对话人格（含 trim）
     assert_eq!(
-        effective_persona_uid(&config("   "), &binding(None)),
-        "rama-0001"
+        effective_persona_uid(&config("   "), &binding(None), "  char-0009  "),
+        "char-0009"
     );
+    // 默认对话人格也空白 → 内置默认
     assert_eq!(
-        effective_persona_uid(&config(""), &binding(Some("  "))),
+        effective_persona_uid(&config(""), &binding(Some("  ")), "   "),
         "rama-0001"
     );
 }
@@ -299,6 +315,17 @@ async fn save_credential_rejects_blank_token() {
         assert_eq!(err.category(), "validation");
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 清除凭据的 keychain 键 = 平台名（与保存 / 读取 / 状态查询共用同一映射）。
+///
+/// 说明:
+/// - 不直接调用 `clear_credential`：其键固定为 `qq` / `telegram`，会删除本机生产凭据；
+/// - 组合行为 = 本用例（键映射）+ 下方 `credential_write_read_delete_roundtrip`（删除幂等）。
+#[test]
+fn credential_service_maps_to_platform_key() {
+    assert_eq!(credential_service(ChannelPlatform::Qq), "qq");
+    assert_eq!(credential_service(ChannelPlatform::Telegram), "telegram");
 }
 
 /// 凭据全链路：写入 → 读取 → 删除 → 读取无（随机服务名，自清理）。

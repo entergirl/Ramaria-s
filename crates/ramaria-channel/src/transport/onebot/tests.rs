@@ -101,6 +101,8 @@ enum ServerMode {
     Mute,
     /// 接受连接后立即主动关闭。
     CloseImmediately,
+    /// 接受连接后回一条无 `echo` 的鉴权拒绝应答（retcode=1403）并关闭。
+    AuthReject,
     /// 接受后立即断开 TCP（模拟握手失败）。
     RejectHandshake,
     /// 接受连接后推送一条事件文本。
@@ -146,6 +148,19 @@ async fn spawn_server(mode: ServerMode) -> (String, ServerProbe) {
                     return;
                 };
                 if mode == ServerMode::CloseImmediately {
+                    let _ = ws.close(None).await;
+                    return;
+                }
+                if mode == ServerMode::AuthReject {
+                    let refusal = json!({
+                        "status": "failed",
+                        "retcode": 1403,
+                        "data": null,
+                        "message": "token验证失败",
+                        "wording": "token验证失败",
+                        "echo": null,
+                    });
+                    let _ = ws.send(Message::Text(refusal.to_string().into())).await;
                     let _ = ws.close(None).await;
                     return;
                 }
@@ -395,6 +410,42 @@ async fn disconnect_triggers_reconnect() {
     .await;
     assert!(states.contains(&ConnectionState::Error), "应出现断线错误态");
     assert!(probe.connections.load(Ordering::SeqCst) >= 2, "应发生重连");
+
+    transport.shutdown().await.expect("关停应成功");
+}
+
+/// 运行期鉴权拒绝：协议端回无 `echo` 的 retcode=1403 后断开，上报原因并停止重连。
+#[tokio::test]
+async fn runtime_auth_rejection_stops_reconnect() {
+    let (url, probe) = spawn_server(ServerMode::AuthReject).await;
+    let sink = Arc::new(RecordingSink::default());
+    let transport = build_transport(&url, fast_options(), Arc::clone(&sink));
+
+    transport.connect().await.expect("首连应成功");
+    wait_until(
+        Duration::from_secs(2),
+        || {
+            transport
+                .status()
+                .last_error
+                .as_deref()
+                .is_some_and(|text| text.contains("鉴权失败"))
+        },
+        "应上报鉴权失败原因",
+    )
+    .await;
+
+    assert_eq!(transport.status().state, ConnectionState::Error);
+    let states = sink.states();
+    assert!(
+        states.contains(&ConnectionState::Online),
+        "断连前应已进入在线态: {states:?}"
+    );
+    assert_eq!(
+        probe.connections.load(Ordering::SeqCst),
+        1,
+        "鉴权拒绝后不应重连"
+    );
 
     transport.shutdown().await.expect("关停应成功");
 }

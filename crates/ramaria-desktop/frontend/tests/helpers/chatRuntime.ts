@@ -10,7 +10,12 @@
  * - 只替代宿主，不替代业务状态，断言仍读界面与调用记录
  */
 
-import type { SessionDetail, SessionMessage, SessionSummary } from '../../src/core/api/dto'
+import type {
+  SessionDetail,
+  SessionMessage,
+  SessionSummary,
+  SettingItem,
+} from '../../src/core/api/dto'
 import { setTauriRuntime } from '../../src/core/transport'
 
 export const NOW = Date.now()
@@ -106,6 +111,7 @@ export interface ChatRuntimeOptions {
   sessions?: SessionSummary[]
   sessionDetail?: SessionDetail
   privacy?: 'NotNeeded' | 'Confirmed' | 'NeedsConfirmation'
+  settings?: SettingItem[]
   commands?: CommandOverrides
 }
 
@@ -126,6 +132,8 @@ export function installChatRuntime(options: ChatRuntimeOptions = {}): ChatRuntim
         switch (command) {
           case 'list_personas_full':
             return [RAMA, SELF]
+          case 'get_settings':
+            return options.settings ?? []
           case 'list_sessions':
             return options.sessions ?? [summary()]
           case 'get_session':

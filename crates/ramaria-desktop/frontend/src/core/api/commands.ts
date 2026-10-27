@@ -95,6 +95,7 @@ export const COMMANDS = {
     getStatus: 'get_channel_status',
     start: 'start_channel',
     stop: 'stop_channel',
+    clearCredential: 'clear_channel_credential',
     listBindings: 'list_channel_bindings',
     setBinding: 'set_channel_binding',
   },

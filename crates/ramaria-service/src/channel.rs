@@ -173,11 +173,16 @@ pub(crate) async fn delete_binding(
     Ok(())
 }
 
-/// 绑定生效人格：绑定级 `persona_uid` 优先；否则通道级默认；再空则默认人格。
+/// 绑定生效人格：绑定级 `persona_uid` 优先；否则通道级 `[channel].default_persona_uid`；
+/// 再空则 `fallback`（宿主解析的默认对话人格）；`fallback` 为空则内置默认。
 ///
 /// 说明:
-/// - 三侧均 trim 归一；返回值为 trim 后的非空字符串（纯函数，不访问存储）。
-pub(crate) fn effective_persona_uid(config: &ChannelConfig, binding: &ChannelBinding) -> String {
+/// - 四侧均 trim 归一；返回值为 trim 后的非空字符串（纯函数，不访问存储）。
+pub(crate) fn effective_persona_uid(
+    config: &ChannelConfig,
+    binding: &ChannelBinding,
+    fallback: &str,
+) -> String {
     let bound = binding
         .persona_uid
         .as_deref()
@@ -186,11 +191,15 @@ pub(crate) fn effective_persona_uid(config: &ChannelConfig, binding: &ChannelBin
     if let Some(uid) = bound {
         return uid.to_string();
     }
-    let default_uid = config.default_persona_uid.trim();
-    if default_uid.is_empty() {
+    let channel_default = config.default_persona_uid.trim();
+    if !channel_default.is_empty() {
+        return channel_default.to_string();
+    }
+    let fallback = fallback.trim();
+    if fallback.is_empty() {
         crate::types::DEFAULT_PERSONA_UID.to_string()
     } else {
-        default_uid.to_string()
+        fallback.to_string()
     }
 }
 
@@ -214,12 +223,19 @@ pub(crate) fn read_credential(engine: &Engine, service: &str) -> RamariaResult<O
 }
 
 /// 删除 keychain 凭据（幂等：不存在视同成功）。
-///
-/// 说明:
-/// - 凭据管理底层接口；当前由用例测试消费，生产清理入口接入前暂标 `allow(dead_code)`。
-#[allow(dead_code)]
 pub(crate) fn delete_credential(engine: &Engine, service: &str) -> RamariaResult<()> {
     engine.keychain().delete_api_key(service)
+}
+
+/// 清除平台凭据（幂等；不存在视同成功）。
+///
+/// 说明:
+/// - 只删 OS keychain 条目，不改配置与绑定；
+/// - 运行中的通道持有启动时的配置快照，需重新启停后才按清除后的状态连接。
+pub(crate) fn clear_credential(engine: &Engine, platform: ChannelPlatform) -> RamariaResult<()> {
+    delete_credential(engine, credential_service(platform))?;
+    tracing::info!(platform = %platform.as_str(), "社交通道凭据已清除");
+    Ok(())
 }
 
 /// 保存平台凭据（令牌写入 keychain）。

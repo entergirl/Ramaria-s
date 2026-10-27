@@ -206,7 +206,8 @@ impl Default for McpConfig {
 ///
 /// 字段约定:
 /// - `enabled`: 总开关，默认 false（社交接入默认关闭）；关闭后两平台均不启动。
-/// - `default_persona_uid`: 通道级默认人格（绑定未覆盖时生效），默认 `rama-0001`。
+/// - `default_persona_uid`: 通道级默认人格覆盖（绑定未覆盖时生效）；默认空 =
+///   跟随「默认对话人格」设置（`settings.default_persona_uid`），不可用时回退 `rama-0001`。
 /// - `qq_enabled`: QQ 通道开关（OneBot v11 正向 WS），默认 false。
 /// - `qq_ws_url`: OneBot v11 正向 WS 服务地址（协议端监听，Ramaria 作客户端）。
 /// - `telegram_enabled`: Telegram 通道开关，默认 false。
@@ -225,7 +226,7 @@ impl Default for McpConfig {
 pub struct ChannelConfig {
     /// 社交通道总开关（默认 false）。
     pub enabled: bool,
-    /// 通道级默认人格（默认 "rama-0001"；绑定未覆盖时生效）。
+    /// 通道级默认人格覆盖（默认空 = 跟随默认对话人格；绑定未覆盖时生效）。
     pub default_persona_uid: String,
     /// QQ 通道开关（默认 false）。
     pub qq_enabled: bool,
@@ -242,12 +243,12 @@ impl Default for ChannelConfig {
     ///
     /// 返回:
     /// - 总开关关闭（社交接入默认关，不影响本地功能）。
-    /// - 默认人格 `rama-0001`；QQ 地址取 NapCat 常用默认端口；两平台开关与
-    ///   主动投递开关均关闭。
+    /// - 通道级默认人格留空（跟随默认对话人格）；QQ 地址取 NapCat 常用默认端口；
+    ///   两平台开关与主动投递开关均关闭。
     fn default() -> Self {
         Self {
             enabled: false,
-            default_persona_uid: "rama-0001".to_string(),
+            default_persona_uid: String::new(),
             qq_enabled: false,
             qq_ws_url: "ws://127.0.0.1:3001".to_string(),
             telegram_enabled: false,

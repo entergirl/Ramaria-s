@@ -66,7 +66,7 @@ pub(crate) async fn handle_notice(
     if !binding.enabled {
         return Ok(ignored("binding_disabled"));
     }
-    let persona_uid = engine.channel_effective_persona_uid(&binding);
+    let persona_uid = engine.channel_effective_persona_uid(&binding).await;
 
     // ---- 2. 会话定位 ----
     let Some(session) = storage

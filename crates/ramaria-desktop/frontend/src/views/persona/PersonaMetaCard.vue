@@ -46,13 +46,17 @@ defineEmits<{
 const kindText = computed(() => `${props.persona.kind} · ${personaKindLabel(props.persona.kind)}`)
 const createdText = computed(() => formatDateTime(props.persona.created_at))
 const updatedText = computed(() => formatDateTime(props.persona.updated_at))
+const isSelf = computed(() => props.persona.kind === 'user')
 const defaultNote = computed(() => {
   if (props.defaultError !== '') {
     return '默认人格标记读取失败，当前标记可能不准确。'
   }
+  if (isSelf.value) {
+    return '本人不承担对话职能，不能设为默认对话人格。'
+  }
   return props.isDefault
-    ? '新会话默认使用该人格（记录在本地设置）。'
-    : '设为默认后记录在本地设置，用于区分常用人格。'
+    ? '新会话与外部接入（绑定未覆盖时）默认使用该人格。'
+    : '设为默认后，新会话与外部接入（绑定未覆盖时）默认使用该人格。'
 })
 const llmCopy = stateCopy('persona.degraded.llm')
 </script>
@@ -111,7 +115,7 @@ const llmCopy = stateCopy('persona.degraded.llm')
       <BaseButton
         variant="secondary"
         size="sm"
-        :disabled="isDefault || defaultSaving"
+        :disabled="isSelf || isDefault || defaultSaving"
         :loading="defaultSaving"
         @click="$emit('set-default')"
       >

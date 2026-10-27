@@ -234,7 +234,10 @@ async fn bind_with_existing_persona_sets_override() {
         .await
         .expect("绑定写入应成功");
     assert_eq!(binding.persona_uid.as_deref(), Some("char-0001"));
-    assert_eq!(engine.channel_effective_persona_uid(&binding), "char-0001");
+    assert_eq!(
+        engine.channel_effective_persona_uid(&binding).await,
+        "char-0001"
+    );
     assert!(binding.allow_proactive, "主动投递开关应如实回显");
 
     // 命令层可读回（bindings 空输出路径之外的读写一致性）

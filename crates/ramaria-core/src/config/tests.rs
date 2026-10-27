@@ -1031,7 +1031,10 @@ model_supports_vision = true
 fn channel_config_defaults_follow_decisions() {
     let cfg = RamariaConfig::default();
     assert!(!cfg.channel.enabled, "社交通道总开关默认关闭");
-    assert_eq!(cfg.channel.default_persona_uid, "rama-0001");
+    assert_eq!(
+        cfg.channel.default_persona_uid, "",
+        "通道级默认人格留空：跟随默认对话人格"
+    );
     assert!(!cfg.channel.qq_enabled, "QQ 平台开关默认关闭");
     assert_eq!(cfg.channel.qq_ws_url, "ws://127.0.0.1:3001");
     assert!(!cfg.channel.telegram_enabled, "Telegram 平台开关默认关闭");
@@ -1050,7 +1053,10 @@ schema_version = 1
 "#;
     let cfg: RamariaConfig = toml::from_str(legacy).expect("旧配置应可解析");
     assert!(!cfg.channel.enabled, "缺 [channel] 时回退默认关闭");
-    assert_eq!(cfg.channel.default_persona_uid, "rama-0001");
+    assert_eq!(
+        cfg.channel.default_persona_uid, "",
+        "缺省时通道级默认人格留空"
+    );
 
     // 显式配置可无损恢复；只写部分键时其余键回退默认值
     let toml_text = r#"
@@ -1064,8 +1070,8 @@ qq_ws_url = "ws://192.168.1.10:3001"
     assert!(cfg2.channel.qq_enabled);
     assert_eq!(cfg2.channel.qq_ws_url, "ws://192.168.1.10:3001");
     assert_eq!(
-        cfg2.channel.default_persona_uid, "rama-0001",
-        "未写的键回退默认值"
+        cfg2.channel.default_persona_uid, "",
+        "未写的键回退默认值（留空跟随默认对话人格）"
     );
     assert!(!cfg2.channel.telegram_enabled);
 

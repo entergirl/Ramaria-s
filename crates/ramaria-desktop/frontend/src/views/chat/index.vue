@@ -42,6 +42,7 @@ const {
   privacyDraft,
   init,
   openSession,
+  openDraft,
   startNewSession,
   send,
   retrySend,
@@ -198,6 +199,7 @@ onBeforeUnmount(() => {
       <ChatSessionCard
         v-if="sessionsOpen"
         @select="openSession"
+        @draft="openDraft"
         @create="startNewSession"
         @close="sessionsOpen = false"
         @retry="session.loadList()"
