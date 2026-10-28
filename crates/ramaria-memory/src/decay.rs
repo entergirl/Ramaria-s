@@ -187,7 +187,6 @@ pub fn calc_decay_r(created_at_ms: i64, now_ms: i64, salience: f64, config: &Dec
 /// 返回:
 /// - 应用访问加成后的最终保留率。
 ///
-/// 预留给 v1.6 访问加成接线（docs/dev-1.6/备忘.md D-26-03）
 pub fn apply_access_boost(
     r: f64,
     last_accessed_at_ms: Option<i64>,
@@ -221,7 +220,6 @@ pub fn apply_access_boost(
 /// 返回:
 /// - 最终保留率 R ∈ (0.0, 1.0]。
 ///
-/// 预留给 v1.6 访问加成接线（docs/dev-1.6/备忘.md D-26-03）
 pub fn calc_retention(
     created_at_ms: i64,
     last_accessed_at_ms: Option<i64>,
@@ -250,7 +248,6 @@ const DISTANCE_ADJUST_MIN_R: f64 = 0.1;
 /// 返回:
 /// - 调整后的距离。
 ///
-/// 预留给 v1.6 访问加成接线（docs/dev-1.6/备忘.md D-26-03）
 pub fn adjust_distance(distance: f64, r: f64) -> f64 {
     distance / r.max(DISTANCE_ADJUST_MIN_R)
 }

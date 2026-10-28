@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from 'vitest'
 
-import baseline from '../../../../scripts/config-baseline-3.0.json'
+import baseline from '../../../../scripts/config-baseline.json'
 import { INTERNAL_KEYS, SETTINGS_FIELDS, SETTINGS_GROUPS, schemaKeys } from '../src/config/settingsSchema'
 import { ADVANCED_SECTIONS, BASIC_SECTIONS } from '../src/config/settingsSections'
 

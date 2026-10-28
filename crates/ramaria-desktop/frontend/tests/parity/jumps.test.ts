@@ -2,13 +2,14 @@
  * tests/parity/jumps.test.ts — 跨视图跳转矩阵守卫
  *
  * 覆盖:
- * - 清单结构：编号唯一、触发与目标非空、全局 / 页内范围计数与规格口径一致
+ * - 清单结构：编号唯一、触发与目标非空、全局 / 页内范围计数与基线口径一致
  * - 覆盖引用真实存在：条目指到的测试文件里的用例名没有被改名或删除
- * - 与 `frontend-spec-v3.md` §8 对齐：同编号行的触发 / 目标 / 参数逐字一致
+ * - 与跳转矩阵基线一致：同编号行的触发 / 目标 / 参数逐字一致
  * - 参数 grep 兜底：跳转参数与一次性状态的含义在源码里有对应落点
  *
  * 说明:
- * - 外部文本经 `import.meta.glob` 的 `?raw` 导入取得，避免引入 Node 类型依赖
+ * - 基线表在本文内冻结，不读取仓库外文档；矩阵变更时同批改基线与条目
+ * - 测试源码经 `import.meta.glob` 的 `?raw` 导入取得，避免引入 Node 类型依赖
  */
 
 import { describe, expect, it } from 'vitest'
@@ -21,11 +22,74 @@ const TEST_SOURCES = import.meta.glob('/tests/**/*.test.ts', {
   eager: true,
 }) as Record<string, string>
 
-const SPEC_SOURCES = import.meta.glob('/../../../../docs/dev-3.0/test/frontend-spec-v3.md', {
-  query: '?raw',
-  import: 'default',
-  eager: true,
-}) as Record<string, string>
+/** 跳转矩阵基线：与 `jumps.ts` 条目逐字对照，矩阵变更时同批更新 */
+const SPEC_MATRIX: MatrixRow[] = [
+  { no: '1', trigger: 'needs_setup', target: 'setup', params: '欢迎文案' },
+  {
+    no: '2',
+    trigger: 'downloading_model',
+    target: '不切视图',
+    params: '全局下载横幅（不含 indexing）',
+  },
+  { no: '3', trigger: 'ready', target: '上次导航视图（默认 chat）', params: '恢复所在页' },
+  {
+    no: '4',
+    trigger: 'degraded',
+    target: '上次导航视图',
+    params: '视图内降级条按 degradedReason 分流',
+  },
+  {
+    no: '5',
+    trigger: 'fatal_error / 后端连接失败',
+    target: 'error',
+    params: '错误标题 + 详情',
+  },
+  { no: '6', trigger: '导航项点击', target: '对应视图', params: '无参数；全屏中忽略' },
+  {
+    no: '7',
+    trigger: '记忆 L1 卡「查看对话」',
+    target: 'chat',
+    params: "{sessionId, personaUid, fromView:'memory'}",
+  },
+  {
+    no: '8',
+    trigger: '对话「返回记忆」',
+    target: 'memory',
+    params: '恢复人格 / 页签 / 滚动位置',
+  },
+  {
+    no: '9',
+    trigger: '导入完成「前往记忆页面」',
+    target: 'memory',
+    params: '一次性 preselectPersonaUid',
+  },
+  {
+    no: '10',
+    trigger: '导入完成「查看导入消息」',
+    target: 'chat',
+    params: '一次性导入会话模式',
+  },
+  {
+    no: '11',
+    trigger: '主动消息通知点击',
+    target: 'chat',
+    params: "{sessionId, fromView:'proactive'}；已在 chat 则直接打开会话",
+  },
+  { no: '12', trigger: '首次配置完成', target: '状态机路由', params: '写 appState=ready' },
+  { no: '13', trigger: '人格详情操作', target: '页内二级', params: '不跨视图' },
+  {
+    no: '14',
+    trigger: '品牌键',
+    target: '关于浮层',
+    params: '不切视图；版本 / 检查更新 / 调试开关',
+  },
+  {
+    no: '15',
+    trigger: '设置一 / 二级菜单',
+    target: '页内子页面',
+    params: '默认「基础设置 → 模型与检索」',
+  },
+]
 
 const SRC_SOURCES = import.meta.glob('/src/{app,components,views}/**/*.{ts,vue}', {
   query: '?raw',
@@ -48,43 +112,10 @@ function sourceBySuffix(sources: Record<string, string>, suffix: string): string
   return hit[1]
 }
 
-/** 去掉规格表格里的行内代码标记，便于逐字比对 */
-function plain(text: string): string {
-  return text.replace(/`/g, '')
-}
-
-/** 从规格 §8 的表格解析跳转矩阵行 */
-function matrixRows(): MatrixRow[] {
-  const lines = sourceBySuffix(SPEC_SOURCES, 'frontend-spec-v3.md').split('\n')
-  const start = lines.findIndex((line) => line.trim() === '## 8. 跨视图跳转矩阵')
-  if (start < 0) {
-    throw new Error('规格文档缺少 §8 跳转矩阵小节')
-  }
-
-  const rows: MatrixRow[] = []
-  for (const line of lines.slice(start)) {
-    if (line.trim().startsWith('## ') && line.trim() !== '## 8. 跨视图跳转矩阵') {
-      break
-    }
-    const columns = line.split('|').map((item) => item.trim())
-    // 表格行形如 `| 7 | 触发 | 目标 | 参数 |`
-    if (columns.length < 6 || !/^\d+$/.test(columns[1] ?? '')) {
-      continue
-    }
-    rows.push({
-      no: columns[1] ?? '',
-      trigger: plain(columns[2] ?? ''),
-      target: plain(columns[3] ?? ''),
-      params: plain(columns[4] ?? ''),
-    })
-  }
-  return rows
-}
-
 function rowOf(no: number): MatrixRow {
-  const hit = matrixRows().find((row) => row.no === String(no))
+  const hit = SPEC_MATRIX.find((row) => row.no === String(no))
   if (!hit) {
-    throw new Error(`规格 §8 缺少第 ${no} 条跳转`)
+    throw new Error(`跳转矩阵基线缺少第 ${no} 条`)
   }
   return hit
 }
@@ -119,7 +150,7 @@ describe('跳转矩阵清单结构', () => {
     }
   })
 
-  it('全局 13 条、页内 2 条，与规格口径一致', () => {
+  it('全局 13 条、页内 2 条，与基线口径一致', () => {
     expect(JUMP_MATRIX.filter((entry) => entry.scope === 'global')).toHaveLength(13)
     expect(JUMP_MATRIX.filter((entry) => entry.scope === 'page')).toHaveLength(2)
     expect(JUMP_MATRIX.map((entry) => entry.no)).toEqual(
@@ -143,9 +174,9 @@ describe('跳转矩阵清单结构', () => {
   })
 })
 
-describe('跳转矩阵与规格对齐', () => {
+describe('跳转矩阵与基线一致', () => {
   for (const entry of JUMP_MATRIX) {
-    it(`第 ${entry.no} 条与规格 §8 同编号行一致`, () => {
+    it(`第 ${entry.no} 条与基线同编号行一致`, () => {
       const row = rowOf(entry.no)
       expect(row.trigger).toBe(entry.trigger)
       expect(row.target).toBe(entry.target)

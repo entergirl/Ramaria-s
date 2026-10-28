@@ -1,7 +1,7 @@
 //! crates/ramaria-memory/src/recall.rs - 召回装配共用实现（在线管线与服务层同源）
 //!
 //! 设计特点:
-//! - 单份实现：把「检索 → Persona-Aware 过滤 → 衰减重排 → 预算裁剪 → 段落渲染 → utt 渲染」
+//! - 单份实现：把「检索 → 子层过滤 → 衰减重排 → Persona-Aware 过滤 → 预算裁剪 → 段落渲染 → utt 渲染」
 //!   抽为共用函数，在线管线（Stage 5）与服务层 recall 用例调用同一份，保证两个入口召回同源
 //! - 与宿主解耦：检索器与关键词镜像经只读视图 trait（`RetrieverSource` /
 //!   `KeywordMirrorSource`）注入，本模块不依赖 app / cli / desktop / 协议概念

@@ -5,8 +5,8 @@
 //!   → 门禁（`enabled` / `allow_ingest` / `allow_seal`）→ 服务层用例 → 结果包装
 //!   （`structuredContent` / `isError`）。本 crate 的单元测试只覆盖 schema 与注解（静态面）。
 //! - 传输使用 `tokio::io::duplex` 内存管道：不启动子进程、不依赖网络与 LLM，
-//!   等价于并发手测（`docs/dev-2.1/test/m4-concurrency.md`）中"客户端 → stdio → 工具调用
-//!   → 回执"的链路；多服务端实例共享同一库文件，对应"两个 MCP 客户端 + 同一数据库"并存。
+//!   等价于并发手测中"客户端 → stdio → 工具调用 → 回执"的链路；
+//!   多服务端实例共享同一库文件，对应"两个 MCP 客户端 + 同一数据库"并存。
 //! - 只使用公开 API（`RamariaMcpServer` / `Engine`），不触碰 crate 内部实现。
 //!
 //! 边界:

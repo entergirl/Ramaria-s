@@ -6,7 +6,7 @@
  * - 每条声明绑定覆盖它的测试文件与用例名，供 checklist.test.ts 机器校验引用不漂移
  *
  * 设计特点:
- * - 状态条目的 `cell` 与 `design-qa.md` §9 的格名逐字一致，两份文档由测试对齐
+ * - 状态条目的 `cell` 由 checklist.test.ts 的基线表逐格校验
  * - 不适用的格写 `na` 并给依据，不允许留空
  * - 内容 / 操作条目只写可观察行为，不写实现细节
  */
@@ -42,7 +42,7 @@ export interface ParityEntry {
   /** 声明：该视图在此维度上具备什么 */
   claim: string
   status: ParityEntryStatus
-  /** 仅状态条目：与 `design-qa.md` 的格名一致 */
+  /** 仅状态条目：与状态格基线一致 */
   cell?: string
   /** 已覆盖条目的用例落点 */
   coverage?: ParityCoverage
@@ -52,7 +52,7 @@ export interface ParityEntry {
 
 export interface ParityViewChecklist {
   view: ParityViewId
-  /** `design-qa.md` §9 的验收编号 */
+  /** 验收编号 */
   qaId: string
   entries: ParityEntry[]
 }
@@ -1360,7 +1360,7 @@ const SETTINGS: ParityViewChecklist = {
       cell: '受限·readonly',
       claim: '凭据只读',
       status: 'na',
-      naReason: '凭据只写不回显（掩码展示），不构成视图级只读态；见 frontend-spec-v3 §11',
+      naReason: '凭据只写不回显（掩码展示），不构成视图级只读态',
     },
     {
       id: 'settings-state-restricted-locked',
@@ -1678,7 +1678,7 @@ const ERROR: ParityViewChecklist = {
   ],
 }
 
-/** 九视图 parity 清单（顺序与 `design-qa.md` §4 的 QA-V 行一致） */
+/** 九视图 parity 清单（顺序与 QA-V 编号顺序一致） */
 export const PARITY_CHECKLIST: ParityViewChecklist[] = [
   CHAT,
   MEMORY,

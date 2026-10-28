@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Dict, List, Set
 
 FRONTEND_DIR = Path("crates/ramaria-desktop/frontend")
-CONTRACT_BASELINE = Path("scripts/contract-baseline-3.0.json")
+CONTRACT_BASELINE = Path("scripts/contract-baseline.json")
 DESKTOP_DIR = Path("crates/ramaria-desktop")
 
 # UI 规范：色值只能经令牌引用；令牌文件本身是调色板，不参与裸色值检查

@@ -2,11 +2,11 @@
  * tests/parity/jumps.ts — 跨视图跳转矩阵条目
  *
  * 职责:
- * - 单一源声明 `frontend-spec-v3.md` §8 的跳转条目（13 条全局 + 页内二级）
+ * - 单一源声明跨视图跳转条目（13 条全局 + 页内二级）
  * - 每条绑定覆盖它的测试文件与用例名，供 jumps.test.ts 机器校验引用不漂移
  *
  * 设计特点:
- * - 条目编号、触发、目标与参数与规格 §8 的表格逐字一致，两份由测试对齐
+ * - 条目编号、触发、目标与参数由 jumps.test.ts 的基线表逐字校验
  * - `scope` 区分全局形态变化与页内二级导航：全局 13 条（#1 ~ #12、#14）
  * - 一条跳转的两侧（触发端与落点端）可分别由不同用例覆盖，按文件逐条列出
  * - 只声明可观察的跳转行为，不写实现细节
@@ -25,7 +25,7 @@ export interface JumpCoverage {
 }
 
 export interface JumpEntry {
-  /** 规格 §8 矩阵行号 */
+  /** 矩阵行号 */
   no: number
   /** 触发动作 */
   trigger: string
@@ -42,7 +42,7 @@ export interface JumpEntry {
   naReason?: string
 }
 
-/** 规格 §8 的跳转条目（全局 13 条 + 页内 2 条） */
+/** 跳转条目（全局 13 条 + 页内 2 条） */
 export const JUMP_MATRIX: JumpEntry[] = [
   {
     no: 1,

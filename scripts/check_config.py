@@ -4,7 +4,7 @@
 
 职责:
 - 扫描 config/default.toml 的 section 与键（不依赖第三方 TOML 库）；
-- 与 scripts/config-baseline-3.0.json（3.0 键面机器基线）比对：section 集合、键集合、重复键；
+- 与 scripts/config-baseline.json（键面机器基线）比对：section 集合、键集合、重复键；
 - 交叉校验每个键名在 ramaria-core/src/config/**/*.rs 中存在同名 pub 字段（模板与结构体不脱节）；
 - 不一致即退出码 1。
 
@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
 CONFIG_REL = Path("config/default.toml")
-BASELINE_REL = Path("scripts/config-baseline-3.0.json")
+BASELINE_REL = Path("scripts/config-baseline.json")
 CONFIG_RS_DIR = Path("crates/ramaria-core/src/config")
 
 
@@ -95,7 +95,7 @@ def load_baseline(path: Path) -> Dict:
 
 def main(argv: List[str]) -> int:
     reconfigure_streams()
-    parser = argparse.ArgumentParser(description="校验 Ramaria 3.0 配置键面")
+    parser = argparse.ArgumentParser(description="校验 Ramaria 配置键面")
     parser.add_argument("--update", action="store_true", help="重新生成键面基线")
     parser.add_argument("--root", default=None, help="main 仓库根目录（默认脚本上一级）")
     args = parser.parse_args(argv)
@@ -117,7 +117,7 @@ def main(argv: List[str]) -> int:
 
     if args.update:
         payload = {
-            "source": "config/default.toml（3.0 键面机器基线；键面变更经审定后更新）",
+            "source": "config/default.toml（键面机器基线；键面变更经审定后更新）",
             "sections": sections,
             "keys": keys,
         }

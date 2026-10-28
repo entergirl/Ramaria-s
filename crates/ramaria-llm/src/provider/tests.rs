@@ -507,11 +507,8 @@ fn retry_does_not_retry_auth_errors() {
     );
 }
 
-// （原 retry_does_not_retry_config_privacy_errors 与 should_retry_error_type 中
-//  config/privacy 断言逐字重复，已删除）
-
 // =========================================================
-// 精确缓存（v1.5 三层生成缓存 C 决策，详见 docs/dev-1.5/v1.5-decisions.md）
+// 精确缓存
 // =========================================================
 
 /// 内存 mock 缓存：记录调用次数，支持注入查询失败。

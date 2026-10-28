@@ -46,7 +46,7 @@ pub(super) struct L1SummaryResponse {
 // evidence_notes 宽容反序列化 + 校验
 // =========================================================
 
-/// 宽容反序列化 evidence_notes（v1.4 结构化升级的过渡兼容）。
+/// 宽容反序列化 evidence_notes（结构化输出的过渡兼容）。
 ///
 /// 兼容三种输入:
 /// 1. 对象数组 `[{"text": "...", "time": ..., "who": ..., "cause": ...}]` — 直接解析
@@ -54,8 +54,8 @@ pub(super) struct L1SummaryResponse {
 /// 3. 缺失 / null / 非数组 — 返回 None
 ///
 /// 说明:
-/// - 存储层（memory_l1 表）格式约定：只读写新格式，无旧格式解析分支（见 docs/dev-1.5/v1.5-decisions.md）；
-///   此处的宽容解析仅针对 LLM 输出（M4 之前 prompt 仍为旧格式）。
+/// - 存储层（memory_l1 表）格式约定：只读写新格式，无旧格式解析分支；
+///   此处的宽容解析仅针对 LLM 输出，容许模型返回旧格式字符串数组。
 fn deserialize_evidence_notes<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<Vec<EvidenceNote>>, D::Error>

@@ -1,5 +1,5 @@
 {
-  "source": "config/default.toml（3.0 键面机器基线；键面变更经审定后更新）",
+  "source": "config/default.toml（键面机器基线；键面变更经审定后更新）",
   "sections": [
     "paths",
     "backend",

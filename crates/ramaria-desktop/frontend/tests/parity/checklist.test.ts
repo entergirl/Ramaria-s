@@ -4,10 +4,11 @@
  * 覆盖:
  * - 清单结构：九视图齐全、条目编号唯一、维度合法、覆盖与不适用各带必填字段
  * - 覆盖引用真实存在：条目指到的测试文件里的用例名没有被改名或删除
- * - 与 `design-qa.md` §9 对齐：格名集合一致、`[x]` 对应已覆盖、`[-]` 对应不适用
+ * - 与状态格基线对齐：格名集合一致、`x` 对应已覆盖、`-` 对应不适用
  *
  * 说明:
- * - 两份外部文本经 `import.meta.glob` 的 `?raw` 导入取得，避免引入 Node 类型依赖
+ * - 状态格基线在本文内冻结，不读取仓库外文档；格集合变更时同批更新基线与清单
+ * - 测试源码经 `import.meta.glob` 的 `?raw` 导入取得，避免引入 Node 类型依赖
  */
 
 import { describe, expect, it } from 'vitest'
@@ -21,17 +22,93 @@ const TEST_SOURCES = import.meta.glob('/tests/**/*.test.ts', {
   eager: true,
 }) as Record<string, string>
 
-const QA_SOURCES = import.meta.glob('/../../../../docs/dev-3.0/test/design-qa.md', {
-  query: '?raw',
-  import: 'default',
-  eager: true,
-}) as Record<string, string>
-
 const DIMENSIONS = ['content', 'operation', 'state']
 
 interface QaCell {
   cell: string
   mark: string
+}
+
+/** 视图状态格基线：九视图的格名与验收标记；格集合变更时同批更新 */
+const QA_CELLS: Record<string, QaCell[]> = {
+  chat: [
+    { cell: '默认', mark: 'x' },
+    { cell: '加载', mark: 'x' },
+    { cell: '空', mark: 'x' },
+    { cell: '错误', mark: 'x' },
+    { cell: '降级·index', mark: 'x' },
+    { cell: '降级·llm', mark: 'x' },
+    { cell: '降级·privacy', mark: 'x' },
+    { cell: '受限·readonly', mark: 'x' },
+    { cell: '受限·locked', mark: 'x' },
+  ],
+  memory: [
+    { cell: '默认', mark: 'x' },
+    { cell: '加载', mark: 'x' },
+    { cell: '空·no-data', mark: 'x' },
+    { cell: '空·filter', mark: '-' },
+    { cell: '空·capability', mark: '-' },
+    { cell: '错误', mark: 'x' },
+    { cell: '降级·index', mark: 'x' },
+    { cell: '降级·embedding', mark: '-' },
+  ],
+  persona: [
+    { cell: '默认', mark: 'x' },
+    { cell: '加载', mark: 'x' },
+    { cell: '空', mark: 'x' },
+    { cell: '错误', mark: 'x' },
+    { cell: '降级·profile', mark: 'x' },
+    { cell: '降级·llm', mark: 'x' },
+    { cell: '受限·import-locked', mark: 'x' },
+    { cell: '受限·preview-readonly', mark: 'x' },
+  ],
+  rules: [
+    { cell: '默认', mark: 'x' },
+    { cell: '加载', mark: 'x' },
+    { cell: '空', mark: 'x' },
+    { cell: '错误', mark: 'x' },
+    { cell: '降级·llm', mark: 'x' },
+  ],
+  import: [
+    { cell: '默认', mark: 'x' },
+    { cell: '加载·分析', mark: 'x' },
+    { cell: '加载·执行', mark: 'x' },
+    { cell: '空·未选', mark: 'x' },
+    { cell: '错误·解析', mark: 'x' },
+    { cell: '错误·执行', mark: 'x' },
+    { cell: '降级·skipped/L1', mark: 'x' },
+    { cell: '受限·locked', mark: 'x' },
+  ],
+  settings: [
+    { cell: '默认', mark: 'x' },
+    { cell: '加载', mark: 'x' },
+    { cell: '空·局部', mark: 'x' },
+    { cell: '错误·主请求', mark: 'x' },
+    { cell: '错误·单卡', mark: 'x' },
+    { cell: '降级·embedding', mark: 'x' },
+    { cell: '降级·llm', mark: 'x' },
+    { cell: '降级·index', mark: 'x' },
+    { cell: '降级·partial', mark: 'x' },
+    { cell: '受限·readonly', mark: '-' },
+    { cell: '受限·locked', mark: 'x' },
+  ],
+  debug: [
+    { cell: '默认', mark: 'x' },
+    { cell: '加载', mark: 'x' },
+    { cell: '空', mark: 'x' },
+    { cell: '错误', mark: 'x' },
+    { cell: '降级·dir', mark: 'x' },
+  ],
+  setup: [
+    { cell: '默认', mark: 'x' },
+    { cell: '加载', mark: 'x' },
+    { cell: '错误', mark: 'x' },
+    { cell: '受限', mark: 'x' },
+  ],
+  error: [
+    { cell: '错误详情', mark: 'x' },
+    { cell: '重试中', mark: 'x' },
+  ],
 }
 
 function sourceBySuffix(sources: Record<string, string>, suffix: string): string {
@@ -42,21 +119,13 @@ function sourceBySuffix(sources: Record<string, string>, suffix: string): string
   return hit[1]
 }
 
-/** 从设计 QA 文档解析出某视图的验收格 */
+/** 取某视图的状态格基线 */
 function qaCells(view: string): QaCell[] {
-  const rows = sourceBySuffix(QA_SOURCES, 'design-qa.md').split('\n')
-  const row = rows.find((line) => {
-    const columns = line.split('|')
-    return columns[1]?.trim() === `QA-V-${view}` && columns[2]?.trim() === view
-  })
-  if (!row) {
-    throw new Error(`设计 QA 文档缺少 QA-V-${view} 行`)
+  const hit = QA_CELLS[view]
+  if (!hit) {
+    throw new Error(`状态格基线缺少视图 ${view}`)
   }
-  const field: string = row.split('|')[3] ?? ''
-  return Array.from(field.matchAll(/\[([ x-])\]([^\s|]+)/g)).map((match: RegExpMatchArray) => ({
-    mark: match[1] ?? '',
-    cell: match[2] ?? '',
-  }))
+  return hit
 }
 
 function stateEntries(view: string): ParityEntry[] {
@@ -132,7 +201,7 @@ describe('parity 清单结构', () => {
   })
 })
 
-describe('parity 清单与设计 QA 对齐', () => {
+describe('parity 清单与状态格基线一致', () => {
   for (const view of PARITY_CHECKLIST) {
     it(`${view.qaId} 的格名与标记和文档一致`, () => {
       const doc = qaCells(view.view)

@@ -4,12 +4,12 @@
 
 职责:
 - 把 ramaria-storage/migrations/*.sql 应用到内存 SQLite（迁移驱动，不手写 DDL）；
-- 生成规范化 schema 快照（表 / 索引 DDL + 计数头），与 scripts/schema/expected.sql 比对（文档仓副本存在时同步校验）；
+- 生成规范化 schema 快照（表 / 索引 DDL + 计数头），与 scripts/schema/expected.sql 比对；
 - 快照不一致、migration 不是单文件、schema_version 不是 3 时退出码 1。
 
 用法:
 - python scripts/check_schema.py            校验（CI / 本地）
-- python scripts/check_schema.py --update   重新生成主快照并同步文档副本（schema 变更并已审定时）
+- python scripts/check_schema.py --update   重新生成快照（schema 变更并已审定时）
 
 退出码:
 - 0: 一致；1: 不一致或基线不满足；2: 用法 / 环境错误。
@@ -24,10 +24,9 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 MIGRATION_GLOB = "*.sql"
-CONTRACT_BASELINE = Path("scripts/contract-baseline-3.0.json")
+CONTRACT_BASELINE = Path("scripts/contract-baseline.json")
 EXPECTED_VERSION = "3"
 EXPECTED_REL = Path("scripts/schema/expected.sql")
-EXPECTED_DOC_REL = Path("../docs/dev-3.0/test/schema/expected.sql")
 
 
 class SetupError(Exception):
@@ -166,13 +165,12 @@ def main(argv: List[str]) -> int:
     root = Path(args.root).resolve() if args.root else Path(__file__).resolve().parent.parent
     migration_dir = root / "crates/ramaria-storage/migrations"
     expected_path = root / EXPECTED_REL
-    doc_path = root / EXPECTED_DOC_REL
 
     try:
         files = load_migrations(migration_dir)
         if len(files) != 1:
             print(
-                "[FAIL] 3.0 基线要求单 migration 文件，实际 %d 个: %s"
+                "[FAIL] 单基线要求单 migration 文件，实际 %d 个: %s"
                 % (len(files), ", ".join(path.name for path in files))
             )
             return 1
@@ -225,10 +223,6 @@ def main(argv: List[str]) -> int:
         expected_path.parent.mkdir(parents=True, exist_ok=True)
         io.open(expected_path, "w", encoding="utf-8", newline="\n").write(snapshot)
         print("[OK] 已生成 schema 快照: %s" % expected_path.relative_to(root).as_posix())
-        # 文档仓可见副本（CI 只检出 main，故以 scripts/schema 为主副本）
-        if doc_path.parent.is_dir():
-            io.open(doc_path, "w", encoding="utf-8", newline="\n").write(snapshot)
-            print("[OK] 已同步文档副本: %s" % EXPECTED_DOC_REL.as_posix())
         return 0
 
     try:
@@ -238,14 +232,6 @@ def main(argv: List[str]) -> int:
         return 2
 
     if expected.replace("\r\n", "\n") == snapshot:
-        if doc_path.is_file():
-            doc_text = io.open(doc_path, encoding="utf-8").read().replace("\r\n", "\n")
-            if doc_text != snapshot:
-                print(
-                    "[FAIL] 文档副本与主副本不一致: %s（请执行 --update 同步）"
-                    % EXPECTED_DOC_REL.as_posix()
-                )
-                return 1
         print("[OK] schema 快照一致（%s）" % files[0].name)
         return 0
 

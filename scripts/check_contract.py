@@ -5,7 +5,7 @@
 职责:
 - 解析 Rust 源码的机器事实（Tauri 注册表 / CLI 顶层枚举 / MCP 工具 / 桌面事件 / migration）；
 - 解析前端命令表（`frontend/src/core/api/commands.ts`）与契约视图目录（`frontend/src/views`）；
-- 与 scripts/contract-baseline-3.0.json（docs/dev-3.0/test/contract-baseline-3.0.md 的机器投影）逐项比对；
+- 与 scripts/contract-baseline.json（现行契约基线文档的机器投影）逐项比对；
 - 任一集合或计数不一致即退出码 1（秒级，供 CI 与本地使用）。
 
 用法:
@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Set
 
-MANIFEST_REL = Path("scripts/contract-baseline-3.0.json")
+MANIFEST_REL = Path("scripts/contract-baseline.json")
 DESKTOP_LIB = Path("crates/ramaria-desktop/src/lib.rs")
 FRONTEND_COMMANDS = Path("crates/ramaria-desktop/frontend/src/core/api/commands.ts")
 FRONTEND_VIEWS = Path("crates/ramaria-desktop/frontend/src/views")
@@ -165,7 +165,7 @@ def compare_list(
 
 def main(argv: List[str]) -> int:
     reconfigure_streams()
-    parser = argparse.ArgumentParser(description="校验 Ramaria 3.0 入口契约")
+    parser = argparse.ArgumentParser(description="校验 Ramaria 入口契约")
     parser.add_argument("--root", default=None, help="main 仓库根目录（默认脚本上一级）")
     args = parser.parse_args(argv)
 

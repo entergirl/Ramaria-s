@@ -62,7 +62,7 @@ jobs:
   # ---- 覆盖率报告（阈值阻塞） ----
   # 使用 cargo-llvm-cov 生成行覆盖率报告，行覆盖率低于阈值即失败（拦截覆盖率回退）。
   # 阈值口径：全局行覆盖率下限 80%；模块级目标（新模块 ≥85% / 重度修改模块 ≥80%）
-  # 见 docs/dev-2.0/v2.0-checklist.md「覆盖率目标」，按发布前人工核验执行。
+  # 模块级目标按发布前人工核验执行，不设 CI 阈值。
   # ramaria-testkit 为 dev-only 测试基建，不计入覆盖率分母。
   # 仅适用于 Windows（llvm-tools-preview 组件可用）。
   coverage:

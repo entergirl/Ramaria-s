@@ -12,7 +12,7 @@ pub mod example_selector;
 pub mod layer_guard;
 pub mod layers;
 
-/// Prompt 模板版本常量（缓存失效键组成部分；决策记录见 docs/dev-1.5/v1.5-decisions.md）。
+/// Prompt 模板版本常量（缓存失效键组成部分）。
 ///
 /// 约定:
 /// - 随 `prompt/builder.rs` / `prompt/layers.rs` 的模板结构或语义变更时递增，
