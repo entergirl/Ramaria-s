@@ -22,14 +22,12 @@ async fn summarize_session_integration_basic() {
 
     // 准备 mock 存储：3 条对话消息
     let storage = MockStorage::new();
-    storage.add_messages(
-        session_id,
-        vec![
-            make_msg(session_id, MessageRole::User, "今天天气真不错"),
-            make_msg(session_id, MessageRole::Assistant, "是啊，适合出去走走"),
-            make_msg(session_id, MessageRole::User, "不过最近工作有点累"),
-        ],
-    );
+    let msgs = vec![
+        make_msg(session_id, MessageRole::User, "今天天气真不错"),
+        make_msg(session_id, MessageRole::Assistant, "是啊，适合出去走走"),
+        make_msg(session_id, MessageRole::User, "不过最近工作有点累"),
+    ];
+    storage.add_messages(session_id, msgs.clone());
     storage.set_keywords(vec!["天气".into(), "工作".into(), "疲惫".into()]);
 
     // 准备 mock LLM：返回有效 JSON（使用 serde_json 构造确保格式正确）
@@ -78,9 +76,23 @@ async fn summarize_session_integration_basic() {
         "evidence_notes 不应为空"
     );
 
+    // 整会话单块：区间覆盖全部消息的首末 id
+    assert_eq!(
+        l1.start_msg_id,
+        Some(msgs[0].id),
+        "区间起点应为块内首条消息 id"
+    );
+    assert_eq!(
+        l1.end_msg_id,
+        Some(msgs[msgs.len() - 1].id),
+        "区间终点应为块内末条消息 id"
+    );
+
     // 验证存储写入
     let saved = storage.saved_l1_entries();
     assert_eq!(saved.len(), 1, "应保存 1 条 L1 记录");
+    assert_eq!(saved[0].start_msg_id, l1.start_msg_id, "落库行保留区间起点");
+    assert_eq!(saved[0].end_msg_id, l1.end_msg_id, "落库行保留区间终点");
     assert!(storage.keyword_count() >= 1, "应写入至少 1 个关键词");
 }
 

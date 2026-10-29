@@ -97,6 +97,8 @@ pub fn make_valid_l1(summary: &str) -> ramaria_core::types::MemoryL1 {
     ramaria_core::types::MemoryL1 {
         id: ramaria_core::types::new_id(),
         session_id: ramaria_core::types::new_id(),
+        start_msg_id: None,
+        end_msg_id: None,
         summary: summary.to_string(),
         keywords: Some("测试, 关键字".to_string()),
         time_period: Some("上午".to_string()),

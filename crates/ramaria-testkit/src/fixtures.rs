@@ -89,6 +89,8 @@ where
     let mut l1 = MemoryL1 {
         id: Uuid::new_v4(),
         session_id,
+        start_msg_id: None,
+        end_msg_id: None,
         summary: summary.to_string(),
         keywords: Some("测试,夹具".to_string()),
         time_period: Some("上午".to_string()),

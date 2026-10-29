@@ -5,7 +5,7 @@
 -- - 新库首次执行即得最终 schema；全部使用 CREATE TABLE / CREATE INDEX，
 --   不使用 ALTER / DROP，所有最终列直接写入建表定义。
 -- - 时间字段统一 INTEGER（Unix 毫秒）。
--- - 显式索引 44 个（含两个部分唯一索引）；外键由连接池 PRAGMA foreign_keys 生效。
+-- - 显式索引 45 个（含两个部分唯一索引）；外键由连接池 PRAGMA foreign_keys 生效。
 -- - 末尾写入 schema 版本键；创建索引的语句紧随所属表，便于对账。
 -- =========================================================
 
@@ -192,7 +192,9 @@ CREATE TABLE memory_l1 (
     situation_strength INTEGER,             -- 情境强度 1-5（NULL 等效 3 中性）
     evidence_notes     TEXT,                -- 结构化对象数组 [{text,time?,who?,cause?}]
     continuation       TEXT,                -- 与上一对话块的延续/转折/无关枚举
-    occurred_at        INTEGER              -- 块内最早消息时间；读取侧回退 created_at
+    occurred_at        INTEGER,             -- 块内最早消息时间；读取侧回退 created_at
+    start_msg_id       TEXT,                -- 摘要覆盖区间的首条消息 id（软引用，无外键）
+    end_msg_id         TEXT                 -- 摘要覆盖区间的末条消息 id（软引用，无外键）
 );
 CREATE INDEX idx_memory_l1_session ON memory_l1(session_id);
 CREATE INDEX idx_memory_l1_absorbed ON memory_l1(absorbed);
@@ -478,4 +480,4 @@ CREATE INDEX idx_memory_vectors_model ON memory_vectors(model, doc_type);
 -- schema 版本键
 -- =========================================================
 
-INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '3');
+INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '4');

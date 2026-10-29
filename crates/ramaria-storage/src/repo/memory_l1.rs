@@ -8,9 +8,10 @@
 //! - persona_uid 和 context_json 为 新增列，支持人格关联和分组键
 //! - situation_strength 为 新增列（默认 NULL，等效 3），
 //!   避免存量 NULL 值使加权逻辑跳过记录
+//! - start_msg_id / end_msg_id 记录摘要覆盖的消息区间（软引用，可空）
 
 use crate::repo::StorageResultExt;
-use crate::repo::parse_uuid_required;
+use crate::repo::{parse_uuid_optional, parse_uuid_required};
 use crate::retry::with_busy_retry;
 use ramaria_core::error::RamariaResult;
 use ramaria_core::types::{EvidenceNote, MemoryL1};
@@ -21,6 +22,10 @@ use uuid::Uuid;
 struct L1Row {
     id: String,
     session_id: String,
+    /// 摘要区间首条消息 id（TEXT 软引用，可空）
+    start_msg_id: Option<String>,
+    /// 摘要区间末条消息 id（TEXT 软引用，可空）
+    end_msg_id: Option<String>,
     summary: String,
     keywords: Option<String>,
     time_period: Option<String>,
@@ -45,6 +50,8 @@ impl L1Row {
     fn into_l1(self) -> RamariaResult<MemoryL1> {
         let id = parse_uuid_required(&self.id, "memory_l1", "id")?;
         let session_id = parse_uuid_required(&self.session_id, "memory_l1", "session_id")?;
+        let start_msg_id = parse_uuid_optional(&self.start_msg_id, "memory_l1", "start_msg_id")?;
+        let end_msg_id = parse_uuid_optional(&self.end_msg_id, "memory_l1", "end_msg_id")?;
 
         // evidence_notes: TEXT 存储 JSON 对象数组，反序列化为 Vec<EvidenceNote>
         // （v1.4 结构化格式：{text, time?, who?, cause?}，由 migration 一次性迁移）
@@ -62,6 +69,8 @@ impl L1Row {
         Ok(MemoryL1 {
             id,
             session_id,
+            start_msg_id,
+            end_msg_id,
             summary: self.summary,
             keywords: self.keywords,
             time_period: self.time_period,
@@ -97,13 +106,16 @@ pub async fn save(pool: &SqlitePool, l1: &MemoryL1) -> RamariaResult<()> {
     // 多进程写锁争用时有限重试，避免 database is locked 直接失败
     with_busy_retry("保存 L1 记忆", || async {
         sqlx::query(
-            "INSERT INTO memory_l1 (id, session_id, summary, keywords, time_period, atmosphere,
-             valence, salience, absorbed, created_at, occurred_at, last_accessed_at, persona_uid,
-             context_json, situation_strength, evidence_notes, continuation)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO memory_l1 (id, session_id, start_msg_id, end_msg_id, summary, keywords,
+             time_period, atmosphere, valence, salience, absorbed, created_at, occurred_at,
+             last_accessed_at, persona_uid, context_json, situation_strength, evidence_notes,
+             continuation)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(l1.id.to_string())
         .bind(l1.session_id.to_string())
+        .bind(l1.start_msg_id.map(|id| id.to_string()))
+        .bind(l1.end_msg_id.map(|id| id.to_string()))
         .bind(&l1.summary)
         .bind(&l1.keywords)
         .bind(&l1.time_period)
@@ -147,9 +159,9 @@ pub async fn delete_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaRe
 
 pub async fn list_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaResult<Vec<MemoryL1>> {
     let rows = sqlx::query_as::<_, L1Row>(
-        "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,
-         absorbed, created_at, occurred_at, last_accessed_at, persona_uid, context_json,
-         situation_strength, evidence_notes, continuation
+        "SELECT id, session_id, start_msg_id, end_msg_id, summary, keywords, time_period,
+         atmosphere, valence, salience, absorbed, created_at, occurred_at, last_accessed_at,
+         persona_uid, context_json, situation_strength, evidence_notes, continuation
          FROM memory_l1 WHERE session_id = ? ORDER BY COALESCE(occurred_at, created_at) ASC",
     )
     .bind(session_id.to_string())
@@ -163,9 +175,9 @@ pub async fn list_by_session(pool: &SqlitePool, session_id: Uuid) -> RamariaResu
 
 pub async fn get(pool: &SqlitePool, id: Uuid) -> RamariaResult<Option<MemoryL1>> {
     let row = sqlx::query_as::<_, L1Row>(
-        "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,
-         absorbed, created_at, occurred_at, last_accessed_at, persona_uid, context_json,
-         situation_strength, evidence_notes, continuation
+        "SELECT id, session_id, start_msg_id, end_msg_id, summary, keywords, time_period,
+         atmosphere, valence, salience, absorbed, created_at, occurred_at, last_accessed_at,
+         persona_uid, context_json, situation_strength, evidence_notes, continuation
          FROM memory_l1 WHERE id = ?",
     )
     .bind(id.to_string())
@@ -277,9 +289,9 @@ pub async fn touch(pool: &SqlitePool, l1_ids: &[Uuid], now_ms: i64) -> RamariaRe
 
 pub async fn list_unabsorbed(pool: &SqlitePool, persona_uid: &str) -> RamariaResult<Vec<MemoryL1>> {
     let rows = sqlx::query_as::<_, L1Row>(
-        "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,
-         absorbed, created_at, occurred_at, last_accessed_at, persona_uid, context_json,
-         situation_strength, evidence_notes, continuation
+        "SELECT id, session_id, start_msg_id, end_msg_id, summary, keywords, time_period,
+         atmosphere, valence, salience, absorbed, created_at, occurred_at, last_accessed_at,
+         persona_uid, context_json, situation_strength, evidence_notes, continuation
          FROM memory_l1 WHERE absorbed = 0 AND persona_uid = ? ORDER BY COALESCE(occurred_at, created_at) ASC",
     )
     .bind(persona_uid)
@@ -298,9 +310,9 @@ pub async fn list_unabsorbed(pool: &SqlitePool, persona_uid: &str) -> RamariaRes
 ///   但检索侧对 NULL persona 文档不做过滤，任何画像可命中）。
 pub async fn list_unabsorbed_unbound(pool: &SqlitePool) -> RamariaResult<Vec<MemoryL1>> {
     let rows = sqlx::query_as::<_, L1Row>(
-        "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,
-         absorbed, created_at, occurred_at, last_accessed_at, persona_uid, context_json,
-         situation_strength, evidence_notes, continuation
+        "SELECT id, session_id, start_msg_id, end_msg_id, summary, keywords, time_period,
+         atmosphere, valence, salience, absorbed, created_at, occurred_at, last_accessed_at,
+         persona_uid, context_json, situation_strength, evidence_notes, continuation
          FROM memory_l1 WHERE absorbed = 0 AND persona_uid IS NULL ORDER BY COALESCE(occurred_at, created_at) ASC",
     )
     .fetch_all(pool)
@@ -384,9 +396,9 @@ pub async fn list_recent_by_persona(
     limit: u32,
 ) -> RamariaResult<Vec<MemoryL1>> {
     let rows = sqlx::query_as::<_, L1Row>(
-        "SELECT id, session_id, summary, keywords, time_period, atmosphere, valence, salience,
-         absorbed, created_at, occurred_at, last_accessed_at, persona_uid, context_json,
-         situation_strength, evidence_notes, continuation
+        "SELECT id, session_id, start_msg_id, end_msg_id, summary, keywords, time_period,
+         atmosphere, valence, salience, absorbed, created_at, occurred_at, last_accessed_at,
+         persona_uid, context_json, situation_strength, evidence_notes, continuation
          FROM memory_l1 WHERE persona_uid = ? ORDER BY COALESCE(occurred_at, created_at) DESC LIMIT ?",
     )
     .bind(persona_uid)

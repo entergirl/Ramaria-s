@@ -2,13 +2,20 @@
 //!
 //! 设计特点:
 //! - 通过 key-value 表管理 schema_version
-//! - schema_version 由 migration 写入；get_schema_version 供调用方显式校验（当前无启动期自动拦截）
+//! - schema_version 由 migration 写入；启动期由 database 预检拦截不兼容版本，get_schema_version 供调用方显式校验
 //! - 版本值统一解析为 i32，非法值时返回 Storage 错误而非静默回退
 
 use crate::repo::StorageResultExt;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::IndexCorpusStamp;
 use sqlx::SqlitePool;
+
+/// 当前程序支持的 schema 版本。
+///
+/// 说明:
+/// - 与 migration 末尾写入的 `schema_version` 键同值；启动预检与读取校验共用本常量，
+///   避免版本号在多处漂移。
+pub const CURRENT_SCHEMA_VERSION: i32 = 4;
 
 pub async fn get_schema_version(pool: &SqlitePool) -> RamariaResult<i32> {
     let version_str: String =

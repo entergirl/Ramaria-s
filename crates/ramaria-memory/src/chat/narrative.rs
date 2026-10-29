@@ -165,6 +165,8 @@ pub(super) fn search_result_to_memory_l1(sr: &SearchResult) -> Option<MemoryL1> 
     Some(MemoryL1 {
         id,
         session_id: uuid::Uuid::nil(),
+        start_msg_id: None,
+        end_msg_id: None,
         summary: sr.doc_summary.clone(),
         keywords: None,
         time_period: None,

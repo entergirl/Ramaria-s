@@ -5,6 +5,7 @@
 //! - 覆盖关键表的列形态与主键（向量表、utt 块、后台任务、L2 去重指纹）
 //! - 覆盖迁移记录数与迁移目录文件数一致
 //! - 覆盖列表查询所需复合索引的齐备性
+//! - 覆盖启动期 schema 版本门禁（旧库拒绝、原库不被改写、新库可重复启动）
 
 use super::*;
 
@@ -12,7 +13,11 @@ use super::*;
 async fn schema_version() {
     let storage = setup().await;
     let v = storage.get_schema_version().await.unwrap();
-    assert_eq!(v, 3, "schema 版本应为 3");
+    assert_eq!(
+        v,
+        crate::repo::schema_meta::CURRENT_SCHEMA_VERSION,
+        "schema 版本应与当前程序常量一致"
+    );
 }
 
 /// 迁移完整性：空库初始化后 `_sqlx_migrations` 记录数与迁移目录文件数一致。
@@ -71,7 +76,7 @@ async fn baseline_schema_totals() {
         .expect("查询外键应成功");
         foreign_keys += fks.len();
     }
-    assert_eq!(columns, 259, "列数应为 259");
+    assert_eq!(columns, 261, "列数应为 261");
     assert_eq!(foreign_keys, 28, "外键数应为 28");
 
     let indexes: Vec<String> = sqlx::query_scalar(
@@ -205,4 +210,158 @@ async fn schema_pair_indexes_present() {
                 .unwrap();
         assert_eq!(found.as_deref(), Some(name), "缺少索引 {name}");
     }
+}
+
+// =========================================================
+// 启动期 schema 版本门禁
+// =========================================================
+
+/// 临时目录路径（用例结束清理）。
+fn gate_temp_dir() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("ramaria-schema-gate-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("创建临时目录失败");
+    dir
+}
+
+/// 用最小 DDL 造一个旧版本库（模拟历史产物，不复制完整基线）。
+async fn write_legacy_db(db_path: &std::path::Path, version: &str) {
+    use sqlx::Connection;
+    use sqlx::sqlite::SqliteConnectOptions;
+
+    let options = SqliteConnectOptions::new()
+        .filename(db_path)
+        .create_if_missing(true);
+    let mut conn = sqlx::SqliteConnection::connect_with(&options)
+        .await
+        .expect("创建旧库失败");
+    sqlx::query("CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        .execute(&mut conn)
+        .await
+        .expect("建 schema_meta 失败");
+    sqlx::query("INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)")
+        .bind(version)
+        .execute(&mut conn)
+        .await
+        .expect("写版本键失败");
+    conn.close().await.expect("关闭旧库失败");
+}
+
+/// 旧版本库（v3）被拒绝：错误可读，原文件逐字节不变，不留下附属文件。
+#[tokio::test]
+async fn startup_gate_rejects_legacy_version_without_touching_file() {
+    let dir = gate_temp_dir();
+    let db_path = dir.join("ramaria.db");
+    write_legacy_db(&db_path, "3").await;
+
+    let before = std::fs::read(&db_path).expect("读取旧库失败");
+    let err = database::init_pool(Some(db_path.clone()))
+        .await
+        .expect_err("旧版本库应被拒绝");
+    let msg = err.to_string();
+    assert!(msg.contains("实际版本 3"), "错误应含实际版本: {msg}");
+    assert!(msg.contains("当前版本 4"), "错误应含当前版本: {msg}");
+    assert!(msg.contains("备份后删除或改名"), "错误应含处置提示: {msg}");
+
+    let after = std::fs::read(&db_path).expect("复读旧库失败");
+    assert_eq!(before, after, "拒绝路径不得改写原库");
+
+    let mut entries: Vec<String> = std::fs::read_dir(&dir)
+        .expect("读取临时目录失败")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    entries.sort();
+    assert_eq!(
+        entries,
+        vec!["ramaria.db".to_string()],
+        "不得留下 -wal/-shm 附属文件"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 非空但缺少 schema_meta 的库被拒绝：按“无法识别”报错，原文件不变。
+#[tokio::test]
+async fn startup_gate_rejects_unrecognized_database() {
+    let dir = gate_temp_dir();
+    let db_path = dir.join("ramaria.db");
+    write_legacy_db(&db_path, "4").await;
+    // 抹掉版本表，模拟来源不明的 SQLite 文件
+    {
+        use sqlx::Connection;
+        use sqlx::sqlite::SqliteConnectOptions;
+
+        let options = SqliteConnectOptions::new().filename(&db_path);
+        let mut conn = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .expect("打开库失败");
+        sqlx::query("DROP TABLE schema_meta")
+            .execute(&mut conn)
+            .await
+            .expect("删表失败");
+        sqlx::query("CREATE TABLE messages (id TEXT PRIMARY KEY)")
+            .execute(&mut conn)
+            .await
+            .expect("建用户表失败");
+        conn.close().await.expect("关闭库失败");
+    }
+
+    let before = std::fs::read(&db_path).expect("读取失败");
+    let err = database::init_pool(Some(db_path.clone()))
+        .await
+        .expect_err("无 schema_meta 的库应被拒绝");
+    let msg = err.to_string();
+    assert!(msg.contains("无法识别"), "错误应含无法识别: {msg}");
+    assert!(msg.contains("备份后删除或改名"), "错误应含处置提示: {msg}");
+
+    let after = std::fs::read(&db_path).expect("复读失败");
+    assert_eq!(before, after, "拒绝路径不得改写原库");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 已建好的当前版本库可重复启动：门禁放行，版本键仍为当前版本。
+#[tokio::test]
+async fn startup_gate_allows_current_version_reopen() {
+    let dir = gate_temp_dir();
+    let db_path = dir.join("ramaria.db");
+
+    let pool = database::init_pool(Some(db_path.clone()))
+        .await
+        .expect("首次建库失败");
+    let first = crate::repo::schema_meta::get_schema_version(&pool)
+        .await
+        .expect("读取版本失败");
+    assert_eq!(first, crate::repo::schema_meta::CURRENT_SCHEMA_VERSION);
+    pool.close().await;
+
+    let reopened = database::init_pool(Some(db_path.clone()))
+        .await
+        .expect("当前版本库应可再次启动");
+    let second = crate::repo::schema_meta::get_schema_version(&reopened)
+        .await
+        .expect("读取版本失败");
+    assert_eq!(second, crate::repo::schema_meta::CURRENT_SCHEMA_VERSION);
+    reopened.close().await;
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 零字节文件按新库处理：migration 建表并写入当前版本。
+#[tokio::test]
+async fn startup_gate_treats_empty_file_as_new_database() {
+    let dir = gate_temp_dir();
+    let db_path = dir.join("ramaria.db");
+    std::fs::File::create(&db_path).expect("创建空文件失败");
+
+    let pool = database::init_pool(Some(db_path.clone()))
+        .await
+        .expect("零字节文件应按新库建表");
+    let version = crate::repo::schema_meta::get_schema_version(&pool)
+        .await
+        .expect("读取版本失败");
+    assert_eq!(version, crate::repo::schema_meta::CURRENT_SCHEMA_VERSION);
+    pool.close().await;
+
+    std::fs::remove_dir_all(&dir).ok();
 }

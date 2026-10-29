@@ -132,7 +132,7 @@
     "model-download-progress"
   ],
   "migration_files": [
-    "20261018_v3.0_schema.sql"
+    "20261029_v3.1_schema.sql"
   ],
   "views": [
     "chat",
@@ -147,9 +147,9 @@
   ],
   "schema": {
     "tables": 29,
-    "columns": 259,
+    "columns": 261,
     "explicit_indexes": 45,
     "foreign_keys": 28,
-    "schema_version": "3"
+    "schema_version": "4"
   }
 }

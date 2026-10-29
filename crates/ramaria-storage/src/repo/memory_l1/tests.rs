@@ -3,6 +3,7 @@
 //! 设计特点:
 //! - 覆盖 evidence_notes 结构化槽位往返（get / list_by_session 两条读取路径）
 //! - 覆盖 None 与空数组的语义区分，以及 continuation 的读写一致性
+//! - 覆盖消息区间（start_msg_id / end_msg_id）的读写往返与 None 保持
 //! - 覆盖无主 L1 归属 persona 的幂等语义
 //! - 使用内存 SQLite 真库，migration 产物直接参与读取
 
@@ -14,6 +15,8 @@ fn make_l1_with_slots(session_id: Uuid) -> MemoryL1 {
     MemoryL1 {
         id: Uuid::new_v4(),
         session_id,
+        start_msg_id: Some(Uuid::new_v4()),
+        end_msg_id: Some(Uuid::new_v4()),
         summary: "用户讨论项目延期安排".into(),
         keywords: Some("项目,延期,排期".into()),
         time_period: Some("下午".into()),
@@ -180,6 +183,47 @@ async fn evidence_notes_serialized_json_omits_empty_slots() {
         "空槽位不应出现在存储 JSON 中: {json}"
     );
     assert!(json.contains("用户提到周末加班"));
+}
+
+/// 消息区间往返：save → get / list_by_session 保留首末消息 id；None 字段读回 None。
+#[tokio::test]
+async fn msg_range_roundtrip() {
+    let pool = database::init_test_pool().await.unwrap();
+    let session_id = setup_fixture(&pool).await;
+
+    let with_range = make_l1_with_slots(session_id);
+    let start = with_range.start_msg_id.expect("夹具应带首条消息 id");
+    let end = with_range.end_msg_id.expect("夹具应带末条消息 id");
+    save(&pool, &with_range).await.expect("save 应成功");
+
+    let got = get(&pool, with_range.id).await.unwrap().unwrap();
+    assert_eq!(got.start_msg_id, Some(start), "get 应保留区间起点");
+    assert_eq!(got.end_msg_id, Some(end), "get 应保留区间终点");
+
+    let mut without_range = make_l1_with_slots(session_id);
+    without_range.id = Uuid::new_v4();
+    without_range.start_msg_id = None;
+    without_range.end_msg_id = None;
+    save(&pool, &without_range).await.expect("save 应成功");
+
+    let list = list_by_session(&pool, session_id)
+        .await
+        .expect("list_by_session 应成功");
+    assert_eq!(list.len(), 2);
+    let listed = list
+        .iter()
+        .find(|l1| l1.id == with_range.id)
+        .expect("带区间的记录应可读回");
+    assert_eq!(listed.start_msg_id, Some(start));
+    assert_eq!(listed.end_msg_id, Some(end));
+    let listed_none = list
+        .iter()
+        .find(|l1| l1.id == without_range.id)
+        .expect("无区间记录应可读回");
+    assert!(
+        listed_none.start_msg_id.is_none() && listed_none.end_msg_id.is_none(),
+        "None 区间应保持 None（DB NULL）"
+    );
 }
 
 // =========================================================

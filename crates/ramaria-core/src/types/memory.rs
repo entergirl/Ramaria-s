@@ -98,6 +98,16 @@ impl EvidenceNote {
 pub struct MemoryL1 {
     pub id: Uuid,
     pub session_id: Uuid,
+    /// 摘要覆盖消息区间的首条消息 id。
+    ///
+    /// 说明:
+    /// - 软引用（不加外键），消息被清理后仍保留区间标记；
+    /// - None 表示存量数据未回填区间。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_msg_id: Option<Uuid>,
+    /// 摘要覆盖消息区间的末条消息 id（软引用，None=未回填）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_msg_id: Option<Uuid>,
     /// 摘要文本
     pub summary: String,
     /// 逗号分隔的关键词
@@ -172,6 +182,8 @@ impl MemoryL1 {
         Self {
             id: new_id(),
             session_id,
+            start_msg_id: None,
+            end_msg_id: None,
             summary,
             keywords: None,
             time_period,

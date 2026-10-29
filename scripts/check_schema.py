@@ -5,7 +5,7 @@
 职责:
 - 把 ramaria-storage/migrations/*.sql 应用到内存 SQLite（迁移驱动，不手写 DDL）；
 - 生成规范化 schema 快照（表 / 索引 DDL + 计数头），与 scripts/schema/expected.sql 比对；
-- 快照不一致、migration 不是单文件、schema_version 不是 3 时退出码 1。
+- 快照不一致、migration 不是单文件、schema_version 不是 4 时退出码 1。
 
 用法:
 - python scripts/check_schema.py            校验（CI / 本地）
@@ -25,7 +25,7 @@ from typing import Dict, List, Tuple
 
 MIGRATION_GLOB = "*.sql"
 CONTRACT_BASELINE = Path("scripts/contract-baseline.json")
-EXPECTED_VERSION = "3"
+EXPECTED_VERSION = "4"
 EXPECTED_REL = Path("scripts/schema/expected.sql")
 
 

@@ -30,7 +30,7 @@ async fn db_applies_full_migration() {
         .await
         .expect("读取 schema_version 失败");
     let version: String = row.get("value");
-    assert_eq!(version, "3");
+    assert_eq!(version, "4", "schema 版本应与 migration 写入一致");
 
     db.close().await;
 }

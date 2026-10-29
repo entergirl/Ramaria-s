@@ -137,6 +137,11 @@ impl<'a> L1Summarizer<'a> {
             None
         };
 
+        // 区间元数据：块内首/末消息 id。整会话、utt 分块、渐进分段与投影/分发行
+        // 都经由本入口生成，下游克隆自动继承同一区间。
+        l1.start_msg_id = Some(chunk.start_msg_id);
+        l1.end_msg_id = Some(chunk.end_msg_id);
+
         debug!(
             %session_id,
             block_msg_count = chunk.msg_count,
@@ -401,6 +406,8 @@ impl<'a> L1Summarizer<'a> {
         let l1 = MemoryL1 {
             id: ramaria_core::types::new_id(),
             session_id,
+            start_msg_id: None,
+            end_msg_id: None,
             summary,
             keywords: keywords_str,
             time_period,

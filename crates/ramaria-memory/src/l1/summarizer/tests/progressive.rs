@@ -120,7 +120,7 @@ async fn progressive_triggered_generates_multiple_l1_in_candidate_pool() {
             }
         })
         .collect();
-    storage.add_messages(sid, msgs);
+    storage.add_messages(sid, msgs.clone());
     let llm = MockLlmProvider::new("test-model");
     // 3 段 → 3 次 LLM 调用；第 2/3 段带上一块上文
     llm.set_responses(vec![
@@ -157,6 +157,26 @@ async fn progressive_triggered_generates_multiple_l1_in_candidate_pool() {
     assert!(
         saved.last().unwrap().continuation.is_some(),
         "第 2/3 段带上一块上文 → continuation 非空"
+    );
+
+    // 段区间：5 + 5 + 2 三段各自覆盖首末消息 id
+    let picked: Vec<(Uuid, Uuid)> = saved
+        .iter()
+        .map(|l1| {
+            (
+                l1.start_msg_id.expect("段 L1 应带区间起点"),
+                l1.end_msg_id.expect("段 L1 应带区间终点"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        picked,
+        vec![
+            (msgs[0].id, msgs[4].id),
+            (msgs[5].id, msgs[9].id),
+            (msgs[10].id, msgs[11].id),
+        ],
+        "三段区间应分别覆盖 msgs[0..=4] / msgs[5..=9] / msgs[10..=11]"
     );
 }
 

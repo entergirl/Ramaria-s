@@ -1,7 +1,7 @@
 -- Ramaria schema 快照（自动生成，请勿手改）
 -- 生成命令: python scripts/check_schema.py --update
--- migration: 20261018_v3.0_schema.sql
--- 统计: 表 29 / 列 259 / 显式索引 45 / 外键 28 / schema_version=3
+-- migration: 20261029_v3.1_schema.sql
+-- 统计: 表 29 / 列 261 / 显式索引 45 / 外键 28 / schema_version=4
 
 -- table: backend_config
 CREATE TABLE backend_config (
@@ -152,7 +152,9 @@ CREATE TABLE memory_l1 (
     situation_strength INTEGER,             -- 情境强度 1-5（NULL 等效 3 中性）
     evidence_notes     TEXT,                -- 结构化对象数组 [{text,time?,who?,cause?}]
     continuation       TEXT,                -- 与上一对话块的延续/转折/无关枚举
-    occurred_at        INTEGER              -- 块内最早消息时间；读取侧回退 created_at
+    occurred_at        INTEGER,             -- 块内最早消息时间；读取侧回退 created_at
+    start_msg_id       TEXT,                -- 摘要覆盖区间的首条消息 id（软引用，无外键）
+    end_msg_id         TEXT                 -- 摘要覆盖区间的末条消息 id（软引用，无外键）
 )
 
 -- table: memory_vectors
