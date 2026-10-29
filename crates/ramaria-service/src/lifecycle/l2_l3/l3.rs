@@ -6,6 +6,7 @@
 //! - 快照语义：Phase C 后、事件吸收前写入本轮分布，作为下一轮漂移检测的旧分布基准
 //! - 首轮判定：以"本轮是否产出活跃 trait"为准（Keep-only 稳定轮必须继续漂移检测）
 //! - 降级纪律：Phase B / C 失败不阻塞事件吸收标记，仅记日志后继续；日志只记 persona 与计数
+//! - 运行计数：正常走完 Phase A→B→C 返回本轮标签与吸收计数，提前退出返回 `None`
 
 use std::sync::atomic::AtomicBool;
 
@@ -18,6 +19,19 @@ use crate::engine::Engine;
 // =========================================================
 // L3 性格推断触发检查
 // =========================================================
+
+/// 一次 L3 性格推断的运行计数（供级联入口汇总）。
+///
+/// 字段约定:
+/// - `traits_saved` / `traits_updated` / `traits_deprecated`: Phase B 的三类写入计数；
+/// - `events_absorbed`: 本轮标记为已吸收的事件条数。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct L3RunSummary {
+    pub traits_saved: usize,
+    pub traits_updated: usize,
+    pub traits_deprecated: usize,
+    pub events_absorbed: usize,
+}
 
 /// 检查 L3 性格推断触发条件。
 ///
@@ -32,13 +46,13 @@ use crate::engine::Engine;
 /// - `persona_uid`: 目标人格。
 ///
 /// 返回:
-/// - `true`: 本次启动了性格推断；
-/// - `false`: 未触发（无未吸收事件或条件不满足）。
+/// - `Some(..)`: 本次启动了性格推断，携带本轮运行计数；
+/// - `None`: 未触发（无未吸收事件 / 条件不满足 / 查询失败）。
 pub(crate) async fn check_l3_trigger(
     engine: &Engine,
     shutdown: Option<&AtomicBool>,
     persona_uid: &str,
-) -> bool {
+) -> Option<L3RunSummary> {
     // 停止位中断由调用方轮次循环承担；本函数不额外检查。
     let _ = shutdown;
 
@@ -47,12 +61,12 @@ pub(crate) async fn check_l3_trigger(
         Ok(e) => e,
         Err(e) => {
             warn!(persona_uid, %e, "L3 触发检查：查询未吸收事件失败");
-            return false;
+            return None;
         }
     };
 
     if events.is_empty() {
-        return false;
+        return None;
     }
 
     let now = now_ms();
@@ -78,8 +92,7 @@ pub(crate) async fn check_l3_trigger(
             oldest_days = %format!("{:.1}", oldest_event_age_days),
             "L3 触发条件满足，启动性格推断"
         );
-        run_l3_inference(engine, persona_uid).await;
-        true
+        run_l3_inference(engine, persona_uid).await
     } else {
         info!(
             persona_uid,
@@ -90,7 +103,7 @@ pub(crate) async fn check_l3_trigger(
             "L3 触发条件未满足（需要 {} 条未吸收事件或最早事件 > {} 天，当前 {} 条 {:.1} 天）",
             trigger_count, trigger_days, events.len(), oldest_event_age_days
         );
-        false
+        None
     }
 }
 
@@ -109,7 +122,7 @@ pub(crate) async fn check_l3_trigger(
 /// - Phase C: 校准化置信度更新 + 四维度漂移检测
 /// - Phase C 后、事件吸收前：把本轮分布写入 cluster_snapshots（存档上一期），
 ///   作为下一轮漂移检测对比的旧分布基准（避免同轮自比）。
-pub(super) async fn run_l3_inference(engine: &Engine, persona_uid: &str) {
+pub(super) async fn run_l3_inference(engine: &Engine, persona_uid: &str) -> Option<L3RunSummary> {
     let storage = engine.storage_ref().as_ref();
     let persona_owned = persona_uid.to_string();
 
@@ -118,13 +131,13 @@ pub(super) async fn run_l3_inference(engine: &Engine, persona_uid: &str) {
         Ok(e) => e,
         Err(e) => {
             error!(persona_uid = %persona_owned, %e, "L3 推断：查询事件失败");
-            return;
+            return None;
         }
     };
 
     if events.is_empty() {
         debug!(persona_uid = %persona_owned, "L3 推断：无未吸收事件，跳过");
-        return;
+        return None;
     }
 
     // ---- 创建 JobManager 任务记录（可观测性） ----
@@ -251,7 +264,7 @@ pub(super) async fn run_l3_inference(engine: &Engine, persona_uid: &str) {
                     );
                 }
             }
-            return;
+            return None;
         }
     };
 
@@ -379,6 +392,13 @@ pub(super) async fn run_l3_inference(engine: &Engine, persona_uid: &str) {
         job_id,
         "L3 推断全流程（Phase A→B→C）完成"
     );
+
+    Some(L3RunSummary {
+        traits_saved: phase_b_result.traits_saved,
+        traits_updated: phase_b_result.traits_updated,
+        traits_deprecated: phase_b_result.traits_deprecated,
+        events_absorbed: event_ids.len(),
+    })
 }
 
 // =========================================================

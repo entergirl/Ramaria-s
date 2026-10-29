@@ -139,7 +139,7 @@ pub(crate) async fn run_scheduled_check(engine: &Engine, shutdown: Option<&Atomi
                         } else {
                             None
                         };
-                        run_l2_extraction(engine, shutdown, &persona.uid, other_name).await;
+                        run_l2_extraction(engine, shutdown, &persona.uid, other_name, true).await;
                     }
                 }
             }

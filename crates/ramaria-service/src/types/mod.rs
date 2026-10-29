@@ -9,6 +9,7 @@
 //! - 枚举序列化统一小写，与 MCP 客户端 JSON 约定一致
 //! - 结构体仅承载数据，不含行为；业务语义由用例层（engine / recall / ingest 等）实现
 
+mod cascade;
 mod channel;
 mod chat;
 mod defaults;
@@ -23,6 +24,7 @@ mod session;
 mod setup;
 mod sticker;
 
+pub use cascade::{CascadeOutcome, CascadeUntil};
 pub use channel::{
     ChannelImageOutcome, ChannelIngestOutcome, ChannelIngestRequest, ChannelIngestedImage,
     ChannelReplyRequest, RecallNoticeRequest, RecallOutcome,

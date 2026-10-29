@@ -26,7 +26,8 @@ use crate::trace::RecallTrace;
 ///
 /// 职责:
 /// - 把「如何持有检索器」与「如何召回」解耦：在线管线持有 `RwLock<Retriever>`，
-///   服务层持有懒加载槽 `RwLock<Option<Retriever>>`，两者共用同一召回实现。
+///   服务层持有懒加载槽 `RwLock<Option<Retriever>>`，两者共用同一召回实现；
+///   一次性构建的降级检索器（索引未就绪时的存储直读实例）直接以自身为视图。
 ///
 /// 实现要求:
 /// - 实现方必须同步返回（仅内存读取），不得在回调内 await，避免 std 锁跨 await。
@@ -66,6 +67,23 @@ pub trait RetrieverSource {
         _decay_config: &DecayConfig,
     ) -> Vec<SearchResult> {
         Vec::new()
+    }
+}
+
+impl RetrieverSource for Retriever {
+    fn with_retriever<R>(&self, f: impl FnOnce(Option<&Retriever>) -> R) -> R {
+        f(Some(self))
+    }
+
+    fn search_narrative(
+        &self,
+        query: &str,
+        persona_uid: &str,
+        top_k: usize,
+        now_ms: i64,
+        decay_config: &DecayConfig,
+    ) -> Vec<SearchResult> {
+        Retriever::search_narrative(self, query, persona_uid, top_k, now_ms, decay_config)
     }
 }
 

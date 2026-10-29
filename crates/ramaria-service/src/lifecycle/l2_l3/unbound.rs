@@ -216,7 +216,7 @@ pub(super) async fn process_unbound_l1_for_l2(
             l1_count = l1s.len(),
             "L2 无主 L1 处理：触发条件满足，启动事件提取（数据断层修复）"
         );
-        run_l2_extraction(engine, shutdown, owner, other_name).await;
+        run_l2_extraction(engine, shutdown, owner, other_name, true).await;
     }
 
     stats

@@ -2,6 +2,7 @@
 //!
 //! 设计特点:
 //! - 触发与执行分离：`l2` / `l3` 只做触发判定与单轮执行，`schedule` 负责后台定时编排
+//! - 单人格路径对外复用：`check_l2_for_persona` 供调度循环与级联入口共用，不写第二份实现
 //! - L2 提取经 `JobManager` 包裹（指数退避重试）；成功后按开关执行知识事实抽取并级联 L3
 //! - L3 全流程：Phase A 统计 + 分层收缩 → Phase B LLM 推断 → Phase C 置信度更新 + 漂移检测
 //! - 无主 L1（数据断层修复）：按来源会话归属 persona 后进入标准 L2 提取链路
@@ -21,7 +22,7 @@ mod schedule;
 mod unbound;
 
 pub(crate) use all::check_all_personas;
-pub(crate) use l2::check_l2_trigger;
+pub(crate) use l2::{check_l2_for_persona, check_l2_trigger};
 pub(crate) use l3::check_l3_trigger;
 pub(crate) use schedule::spawn_scheduler;
 

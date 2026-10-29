@@ -17,6 +17,7 @@
 //! - 边界：本模块负责内存索引与记忆向量的维护；除记忆向量与 BM25 分词版本标记外不写业务表
 
 mod build;
+pub(crate) mod fallback;
 mod rebuild;
 mod stamp;
 pub(crate) mod status;

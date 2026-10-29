@@ -2,22 +2,40 @@
 //!
 //! 设计特点:
 //! - `check_l2_trigger`：遍历全部 persona，未吸收 L1 ≥ 阈值 → 事件提取；另处理无主 L1 归属
+//! - `check_l2_for_persona`：单人格触发路径，供调度循环与级联入口共用（不写第二份实现）
 //! - `run_l2_extraction`：经 `JobManager` 包裹（指数退避重试）；成功后按开关执行知识事实抽取并级联 L3
+//! - 消费口径：`l1_consumed` 取「执行前后未吸收 L1 条数之差」，提取失败不虚报
 //! - 停止位判定 `shutdown_requested`：`None` = 调用方没有宿主循环，不中断
 //! - 所有 LLM 失败均不阻塞级联，仅记日志降级；日志只记 persona 与计数，不记原文
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use ramaria_core::traits::EmbeddingProvider;
+use ramaria_core::types::Persona;
 use ramaria_memory::event::{EventExtractor, EventExtractorConfig};
 use ramaria_memory::job::{JobManager, JobResult, JobType};
 use tracing::{error, info, warn};
 
 use crate::engine::Engine;
 
-use super::l3::check_l3_trigger;
+use super::l3::{L3RunSummary, check_l3_trigger};
 use super::unbound::process_unbound_l1_for_l2;
+
+/// 单人格一次 L2 触发检查的结果（供调度循环与级联入口读取）。
+///
+/// 字段约定:
+/// - `triggered`: 本次是否满足触发条件并执行了提取；
+/// - `l1_consumed`: 本次离开「未吸收 L1」集合的条数（未触发 / 提取失败为 0）；
+/// - `l2_events`: 本次新建的 L2 事件数；
+/// - `l3`: 级联 L3 的运行计数（未级联或未触发为 `None`）。
+#[derive(Debug, Default)]
+pub(crate) struct L2RunOutcome {
+    pub triggered: bool,
+    pub l1_consumed: usize,
+    pub l2_events: usize,
+    pub l3: Option<L3RunSummary>,
+}
 
 /// 宿主停止位是否已置位（`None` = 调用方没有宿主循环，不中断）。
 pub(super) fn shutdown_requested(shutdown: Option<&AtomicBool>) -> bool {
@@ -30,7 +48,8 @@ pub(super) fn shutdown_requested(shutdown: Option<&AtomicBool>) -> bool {
 
 /// 检查 L2 事件提取触发条件（路径 A：即时触发）。
 ///
-/// 遍历所有 persona，检查未吸收 L1 是否 ≥ 阈值（默认 5 条）。
+/// 遍历所有 persona，检查未吸收 L1 是否 ≥ 阈值（默认 5 条）；命中后另处理无主 L1 归属。
+/// 单人格的判定与执行由 [`check_l2_for_persona`] 承担，本函数只做遍历与聚合日志。
 ///
 /// 参数:
 /// - `engine`: 服务层引擎。
@@ -57,47 +76,21 @@ pub(crate) async fn check_l2_trigger(engine: &Engine, shutdown: Option<&AtomicBo
             return;
         }
 
-        let unabsorbed = match storage.list_unabsorbed_l1(&persona.uid).await {
-            Ok(l) => l,
-            Err(e) => {
-                warn!(persona_uid = %persona.uid, %e, "L2 触发检查：查询未吸收 L1 失败");
-                continue;
-            }
-        };
-
         checked += 1;
-        let trigger_count = engine.config().thresholds.l2_trigger_count as usize;
-        if unabsorbed.len() >= trigger_count {
+        // 确定对话另一方名称（仅当 personas 恰好 2 个时可靠）
+        let other_name = if personas.len() == 2 {
+            personas
+                .iter()
+                .find(|p| p.uid != persona.uid)
+                .map(|p| p.name.clone())
+        } else {
+            None
+        };
+        let outcome = check_l2_for_persona(engine, shutdown, persona, other_name, true).await;
+        if outcome.triggered {
             triggered += 1;
-            info!(
-                persona_uid = %persona.uid,
-                unabsorbed_count = unabsorbed.len(),
-                trigger_count,
-                "L2 触发条件满足，启动事件提取"
-            );
-            // 确定对话另一方名称（仅当 personas 恰好 2 个时可靠）
-            let other_name = if personas.len() == 2 {
-                personas
-                    .iter()
-                    .find(|p| p.uid != persona.uid)
-                    .map(|p| p.name.clone())
-            } else {
-                None
-            };
-            run_l2_extraction(engine, shutdown, &persona.uid, other_name).await;
-            // L2 新事件已产生：下一次召回重建内存索引并补算向量（不阻塞提取流程）
-            engine.mark_index_dirty();
         } else {
             skipped += 1;
-            info!(
-                persona_uid = %persona.uid,
-                persona_name = %persona.name,
-                unabsorbed_count = unabsorbed.len(),
-                trigger_count,
-                "L2 触发条件未满足（需要 {} 条未吸收 L1，当前 {} 条）",
-                trigger_count,
-                unabsorbed.len()
-            );
         }
     }
 
@@ -134,6 +127,88 @@ pub(crate) async fn check_l2_trigger(engine: &Engine, shutdown: Option<&AtomicBo
     );
 }
 
+/// 检查单个 persona 的 L2 触发条件并按需执行提取。
+///
+/// 流程:
+/// 1. 读取未吸收 L1，未达阈值 → 返回未触发（日志记计数）；
+/// 2. 达阈值 → 执行一次提取（`cascade_l3` 决定成功后是否级联 L3）→ 置索引脏标记；
+/// 3. 以「执行前后未吸收 L1 条数之差」计消费量（提取失败时差值为 0）。
+///
+/// 参数:
+/// - `engine`: 服务层引擎。
+/// - `shutdown`: 宿主停止位（`None` = 无宿主循环，不中断）。
+/// - `persona`: 目标人格。
+/// - `other_persona_name`: 对话另一方名称（仅恰好两个 persona 时给出）。
+/// - `cascade_l3`: 提取成功后是否继续触发 L3 性格推断。
+///
+/// 返回:
+/// - 触发并执行时 `triggered = true`；阈值未满足 / 查询失败时全零。
+pub(crate) async fn check_l2_for_persona(
+    engine: &Engine,
+    shutdown: Option<&AtomicBool>,
+    persona: &Persona,
+    other_persona_name: Option<String>,
+    cascade_l3: bool,
+) -> L2RunOutcome {
+    let storage = engine.storage_ref().as_ref();
+
+    let unabsorbed = match storage.list_unabsorbed_l1(&persona.uid).await {
+        Ok(l) => l,
+        Err(e) => {
+            warn!(persona_uid = %persona.uid, %e, "L2 触发检查：查询未吸收 L1 失败");
+            return L2RunOutcome::default();
+        }
+    };
+
+    let trigger_count = engine.config().thresholds.l2_trigger_count as usize;
+    if unabsorbed.len() < trigger_count {
+        info!(
+            persona_uid = %persona.uid,
+            persona_name = %persona.name,
+            unabsorbed_count = unabsorbed.len(),
+            trigger_count,
+            "L2 触发条件未满足（需要 {} 条未吸收 L1，当前 {} 条）",
+            trigger_count,
+            unabsorbed.len()
+        );
+        return L2RunOutcome::default();
+    }
+
+    info!(
+        persona_uid = %persona.uid,
+        unabsorbed_count = unabsorbed.len(),
+        trigger_count,
+        "L2 触发条件满足，启动事件提取"
+    );
+    let before = unabsorbed.len();
+    let (l2_events, l3) = run_l2_extraction(
+        engine,
+        shutdown,
+        &persona.uid,
+        other_persona_name,
+        cascade_l3,
+    )
+    .await;
+    // L2 新事件已产生：下一次召回重建内存索引并补算向量（不阻塞提取流程）
+    engine.mark_index_dirty();
+
+    // 消费量按库里实际离开「未吸收」的条数计：提取失败时 L1 仍是未吸收状态，差值为 0
+    let l1_consumed = match storage.list_unabsorbed_l1(&persona.uid).await {
+        Ok(after) => before.saturating_sub(after.len()),
+        Err(e) => {
+            warn!(persona_uid = %persona.uid, %e, "L2 触发检查：复核未吸收 L1 失败，消费量按 0 计");
+            0
+        }
+    };
+
+    L2RunOutcome {
+        triggered: true,
+        l1_consumed,
+        l2_events,
+        l3,
+    }
+}
+
 /// 执行一次 L2 事件提取（通过 JobManager 包裹，带重试和可观测性）。
 ///
 /// `other_persona_name` 用于双向对话场景的角色区分：当已知对话另一方时，
@@ -150,12 +225,17 @@ pub(crate) async fn check_l2_trigger(engine: &Engine, shutdown: Option<&AtomicBo
 /// - `shutdown`: 宿主停止位（供提取成功后的 L3 级联透传）。
 /// - `persona_uid`: 目标人格。
 /// - `other_persona_name`: 对话另一方名称（仅恰好两个 persona 时给出）。
+/// - `cascade_l3`: 提取成功后是否继续触发 L3 性格推断。
+///
+/// 返回:
+/// - `(本次新建事件数, L3 运行计数)`；提取失败时事件数为 0、`l3` 为 `None`。
 pub(super) async fn run_l2_extraction(
     engine: &Engine,
     shutdown: Option<&AtomicBool>,
     persona_uid: &str,
     other_persona_name: Option<String>,
-) {
+    cascade_l3: bool,
+) -> (usize, Option<L3RunSummary>) {
     let storage = engine.storage_ref().as_ref();
     let persona_owned = persona_uid.to_string();
     // auto_fact_detect 增强抽取所需的配置快照（总开关门控）与 embedding 引用（可选）。
@@ -171,6 +251,8 @@ pub(super) async fn run_l2_extraction(
     let llm = engine.llm_ref();
     let job_manager = JobManager::with_defaults(storage);
     let payload = serde_json::json!({ "persona_uid": &persona_owned }).to_string();
+    // 提取产出计数：重试由闭包多次执行，最后一次尝试写入的值为准
+    let events_written = Arc::new(AtomicUsize::new(0));
 
     // 通过 JobManager 包裹执行：create → running → execute → completed/failed
     // 重试由 JobManager 内部处理（指数退避，最大 3 次）
@@ -207,6 +289,7 @@ pub(super) async fn run_l2_extraction(
             let know_enabled = knowledge_enabled;
             let know_config = knowledge_config.clone();
             let embedding_owned = embedding.clone();
+            let written = Arc::clone(&events_written);
             async move {
                 // auto_fact_detect 需要"本批 L1"作为线索→断言（策略②）输入：
                 // 事件提取成功后本批 L1 会被标记 absorbed，故在提取前捕获待吸收列表。
@@ -229,6 +312,7 @@ pub(super) async fn run_l2_extraction(
                 match extractor.extract_events(&uid).await {
                     Ok(events) if events.is_empty() => {
                         info!(persona_uid = %uid, "L2 提取完成，无新事件");
+                        written.store(0, Ordering::Release);
                         JobResult::Success
                     }
                     Ok(events) => {
@@ -237,6 +321,7 @@ pub(super) async fn run_l2_extraction(
                             event_count = events.len(),
                             "L2 事件提取完成"
                         );
+                        written.store(events.len(), Ordering::Release);
                         // auto_fact_detect 增强抽取：开关开启且本批有事件才执行；
                         // 编排器内部静默降级，任何失败不改变 Job 结果、不阻塞 L3 级联。
                         if know_enabled {
@@ -271,6 +356,7 @@ pub(super) async fn run_l2_extraction(
                             error = %e,
                             "L2 事件提取失败，将重试"
                         );
+                        written.store(0, Ordering::Release);
                         JobResult::Retryable(e.to_string())
                     }
                 }
@@ -278,11 +364,17 @@ pub(super) async fn run_l2_extraction(
         })
         .await;
 
+    let l2_events = events_written.load(Ordering::Acquire);
     match job_result {
         Ok(job_id) => {
             info!(persona_uid = %persona_owned, job_id, "L2 事件提取任务完成");
             // L2 成功后级联检查 L3（路径 A）
-            check_l3_trigger(engine, shutdown, &persona_owned).await;
+            let l3 = if cascade_l3 {
+                check_l3_trigger(engine, shutdown, &persona_owned).await
+            } else {
+                None
+            };
+            (l2_events, l3)
         }
         Err(e) => {
             error!(
@@ -290,6 +382,7 @@ pub(super) async fn run_l2_extraction(
                 error = %e,
                 "L2 事件提取失败（已达最大重试次数），L3 级联跳过"
             );
+            (0, None)
         }
     }
 }

@@ -53,8 +53,8 @@ pub(super) const ROLE_IMMERSION_DIRECTIVE: &str = r#"【角色沉浸要求】这
 /// - 摘要路两层（L1 + L2）全开。
 ///
 /// 说明:
-/// - 索引懒加载失败只记 warn 并继续（首条消息不因索引构建失败而阻塞，
-///   检索器缺席时共用实现返回空记忆）；
+/// - 索引未就绪时走存储直读 BM25 降级（不进构建路径、不改索引状态），
+///   已加载时执行懒加载 / 代次刷新；构建失败只记 warn 并继续（首条消息不阻塞）；
 /// - 其余降级（嵌入缺失 / 无命中 / 白名单外）由共用实现内部处理，返回空值。
 pub(crate) async fn step_recall(
     engine: &Engine,
@@ -70,19 +70,30 @@ pub(crate) async fn step_recall(
         return Ok((None, Vec::new(), None));
     }
 
-    if let Err(e) = engine.ensure_index_loaded().await {
-        tracing::warn!(error = %e, "索引加载失败，本次召回继续（可能无记忆注入）");
-    }
+    // 索引未就绪时的首问降级：不进构建路径（不改索引状态），用存储直读 BM25 出召回；
+    // 已加载路径沿用懒加载 / 代次刷新口径（构建失败只记 warn，检索按空记忆继续）。
+    let slot = engine.retriever_slot();
+    let fallback = if engine.is_retriever_loaded() {
+        if let Err(e) = engine.ensure_index_loaded().await {
+            tracing::warn!(error = %e, "索引加载失败，本次召回继续（可能无记忆注入）");
+        }
+        None
+    } else {
+        crate::index::fallback::bm25_only_retriever(engine, persona).await
+    };
+    let retriever = match fallback.as_ref() {
+        Some(retriever) => crate::index::fallback::RecallRetriever::Fallback(retriever),
+        None => crate::index::fallback::RecallRetriever::Slot(&slot),
+    };
 
     // 嵌入 provider 取快照后在锁外使用（缺失 → 共用召回内部降级为 BM25 + 关键词镜像）
     let embedding = engine.embedding_ref();
     let policy = engine.recall_policy();
-    let retriever = engine.retriever_slot();
     let keyword_mirror = engine.keyword_mirror();
     // 人格类型按 persona 行显式解析（行缺失 / 读取失败 → None，共用召回内部保守降级）
     let persona_kind = crate::recall::resolve_persona_kind(storage, persona).await;
     let recall = assemble_recall(RecallInput {
-        retriever: &*retriever,
+        retriever: &retriever,
         keyword_mirror: &*keyword_mirror,
         storage,
         embedding: embedding.as_deref(),

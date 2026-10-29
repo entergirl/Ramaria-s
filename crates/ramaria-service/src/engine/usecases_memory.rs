@@ -11,16 +11,16 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ramaria_core::error::RamariaResult;
+use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::types::{MemoryL1, Session, StickerAsset, now_ms};
 use uuid::Uuid;
 
 use crate::proactive::{ProactiveDirective, ProactiveOutcome};
 use crate::stream_event::ChatStreamHandle;
 use crate::types::{
-    ChannelImageOutcome, ChatSendOutcome, ChatSendRequest, ChatStreamRequest, HistoryRequest,
-    HistoryResult, IngestOutcome, IngestRequest, LocalImageSendOutcome, LocalImageSendRequest,
-    RecallRequest, RecallResult, SealOutcome,
+    CascadeOutcome, CascadeUntil, ChannelImageOutcome, ChatSendOutcome, ChatSendRequest,
+    ChatStreamRequest, HistoryRequest, HistoryResult, IngestOutcome, IngestRequest,
+    LocalImageSendOutcome, LocalImageSendRequest, RecallRequest, RecallResult, SealOutcome,
 };
 
 use super::Engine;
@@ -249,6 +249,74 @@ impl Engine {
     /// - 内部失败只记日志，不向调用方抛错。
     pub async fn trigger_l3_check(&self, persona_uid: &str) {
         crate::lifecycle::l2_l3::check_l3_trigger(self, None, persona_uid).await;
+    }
+
+    /// 级联加工单个 persona 的记忆（L1 → L2，可继续到 L3），返回各层计数。
+    ///
+    /// 职责:
+    /// - 供无桌面环境的批处理入口把语料一次加工到目标层，无需等待后台调度循环；
+    /// - 与调度循环共用 `check_l2_trigger` / `check_l3_trigger` 的同一份实现（含阈值判定、
+    ///   重试包裹、知识事实抽取与日志口径），本层只做单人格选择与计数汇总。
+    ///
+    /// 参数:
+    /// - `persona_uid`: 目标人格（只处理该 persona 的未吸收记忆）。
+    /// - `until`: 跑到该层为止；`L2` 时抑制 L3 级联。
+    ///
+    /// 返回:
+    /// - 各层计数：消费的未吸收 L1 条数、新建事件数、写入的活跃标签数。
+    /// - 目标人格不存在时返回校验错误（文案含 uid，便于调用方定位）。
+    ///
+    /// 说明:
+    /// - 未达阈值时原样返回全零计数（不视为错误）；
+    /// - `l3_traits` 优先取级联内那一次推断的计数；级联未触发 L3 且目标为 `L3` 时补一次
+    ///   幂等检查（无未吸收事件即为 `None`），避免计数漏报。
+    pub async fn cascade(
+        &self,
+        persona_uid: &str,
+        until: CascadeUntil,
+    ) -> RamariaResult<CascadeOutcome> {
+        let personas = self.storage_ref().as_ref().list_personas().await?;
+        let persona = personas
+            .iter()
+            .find(|p| p.uid == persona_uid)
+            .ok_or_else(|| RamariaError::validation(format!("目标人格不存在: {persona_uid}")))?;
+
+        // 对话另一方名称与调度循环同口径：仅当 personas 恰好 2 个时可靠
+        let other_persona_name = if personas.len() == 2 {
+            personas
+                .iter()
+                .find(|p| p.uid != persona_uid)
+                .map(|p| p.name.clone())
+        } else {
+            None
+        };
+
+        let cascade_l3 = until == CascadeUntil::L3;
+        let outcome = crate::lifecycle::l2_l3::check_l2_for_persona(
+            self,
+            None,
+            persona,
+            other_persona_name,
+            cascade_l3,
+        )
+        .await;
+
+        let l3_traits = match outcome.l3 {
+            Some(summary) => summary.traits_saved + summary.traits_updated,
+            None if cascade_l3 => {
+                crate::lifecycle::l2_l3::check_l3_trigger(self, None, persona_uid)
+                    .await
+                    .map_or(0, |summary| summary.traits_saved + summary.traits_updated)
+            }
+            None => 0,
+        };
+
+        Ok(CascadeOutcome {
+            persona_uid: persona_uid.to_string(),
+            l1_consumed: outcome.l1_consumed,
+            l2_events: outcome.l2_events,
+            l3_traits,
+        })
     }
 }
 

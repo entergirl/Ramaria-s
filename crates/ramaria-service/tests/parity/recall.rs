@@ -5,7 +5,7 @@
 //!   时间取"当前时间 - 固定偏移"，保证衰减分数跨运行稳定
 //! - 快照只含稳定字段：模式 / 条目（层、文本、分数）/ 通道命中数 / 截断标记 /
 //!   上下文长度与关键片段命中布尔值；不落 id、时间与上下文全文
-//! - 覆盖三条链路：向量化确实发生（嵌入 mock 调用计数）、基线一致（golden 冻结）、
+//! - 覆盖三条链路：向量化确实发生（预载索引触发嵌入 mock 调用计数）、基线一致（golden 冻结）、
 //!   跨隔离环境等价（`assert_parity`）；另以独立用例锁定人格白名单的隐私拒绝语义
 //! - 输出入口：`snapshot_of` 是"该 fixture 上的规范化输出"的唯一入口，
 //!   快照直接送入 `GoldenStore` 冻结或比对
@@ -90,6 +90,12 @@ fn request() -> RecallRequest {
 /// 在给定环境上执行召回场景，产出规范化快照。
 async fn snapshot_of(env: &ParityEnv) -> ParityResult<Snapshot> {
     fixture(env).await?;
+    // 显式预载索引：本场景度量已加载索引上的召回输出，
+    // 首问降级（索引未就绪走存储直读 BM25）由召回用例单测覆盖
+    env.engine()
+        .ensure_index_loaded()
+        .await
+        .map_err(|e| ParityError::env("预载索引", e))?;
 
     let result = env
         .engine()

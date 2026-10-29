@@ -4,6 +4,8 @@
 //! - 单份实现：检索 → 子层过滤 → 衰减重排 → Persona-Aware 过滤 → 段落与 utt 渲染
 //! - 锁纪律：std 读锁只覆盖同步内存检索；embedding 生成与 touch_l1 在锁外 await
 //! - 静默降级：嵌入 / 镜像 / 索引任一缺席都返回结构完整的空输出
+//! - 关向量零调用：`[retrieval].enable_vector = false` 时不生成任何查询 / 词条嵌入，
+//!   utt 向量通道随 `query_vec = None` 退化为 BM25 子串口径
 //! - 轨迹可选：`assemble_recall_with` 按阶段写入 `RecallTrace`，默认入口不构造轨迹
 
 use std::sync::Arc;
@@ -53,7 +55,7 @@ pub async fn assemble_recall<R: RetrieverSource + ?Sized, K: KeywordMirrorSource
 ///
 /// 流程:
 /// 1. 闸门判定：两个通道全关 → 直接返回空输出（不生成向量、不检索）；
-/// 2. 查询向量：RAG 或（白名单内）utt 需要时生成，失败降级为 None；
+/// 2. 查询向量：向量通道开启且（RAG 或白名单内 utt）需要时生成，失败降级为 None；
 /// 3. 关键词镜像预取：锁内取快照 → 锁外异步查询 → 纯 `(label, score)` 交检索融合；
 /// 4. 多通道检索（读锁内同步）：BM25 + 向量 + 图谱 + 关键词镜像，RRF 融合；
 /// 5. 记忆子层过滤：按 `memory_layers` 剔除未请求的 L1 / L2 文档（图谱实体跟随 `l2`；两层全开 = 无操作）；
@@ -94,12 +96,14 @@ pub async fn assemble_recall_with<R: RetrieverSource + ?Sized, K: KeywordMirrorS
     }
 
     // utt 是否对本 persona 生效（原文白名单双闸门：开关 + 人格类型；类型取显式载体）。
-    // 查询向量仅在 RAG 或 utt（白名单内）需要时生成，避免无效 embedding 调用。
+    // 查询向量仅在向量通道开启且（RAG 或 utt 白名单内）需要时生成，避免无效 embedding 调用；
+    // 关向量时本次召回不产生任何嵌入调用（utt 通道随之下沉到 BM25 子串口径）。
+    let vector_enabled = input.retrieval.enable_vector;
     let utt_persona_allowed = input.gates.utt
         && input
             .persona_kind
             .is_some_and(|kind| input.utt.persona_kind_whitelist.contains(&kind));
-    let need_query_vec = input.gates.memory_rag || utt_persona_allowed;
+    let need_query_vec = vector_enabled && (input.gates.memory_rag || utt_persona_allowed);
 
     // ---- 2. 查询向量（锁外 await；失败降级为 None） ----
     let query_vec: Option<Vec<f32>> = if !need_query_vec {
@@ -156,12 +160,13 @@ pub async fn assemble_recall_with<R: RetrieverSource + ?Sized, K: KeywordMirrorS
             });
         match snapshot {
             Some((composite, pool)) => {
+                // 关向量时语义层不生成嵌入（退化为词典 + 字面口径），保证零嵌入调用
                 let hits = query_text_labels(
                     &composite,
                     &pool,
                     input.query,
                     input.persona_uid,
-                    input.embedding,
+                    input.embedding.filter(|_| vector_enabled),
                     kw_top_k,
                 )
                 .await;

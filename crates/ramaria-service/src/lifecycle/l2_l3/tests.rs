@@ -11,13 +11,18 @@ use super::l3::is_first_inference_round;
 use super::schedule::run_scheduled_check;
 use super::unbound::process_unbound_l1_for_l2;
 use super::*;
+use crate::engine::Engine;
 use crate::test_support::{
-    MockLlm, engine_with_db, engine_with_llm_and_config, seed_l1, seed_persona,
+    MockLlm, ScriptedLlm, engine_with_db, engine_with_llm_and_config,
+    engine_with_shared_scripted_llm, seed_l1, seed_persona,
 };
+use crate::types::CascadeUntil;
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::traits::{StoreCrud, StoreInfrastructure};
 use ramaria_core::types::{MemoryEvent, MemoryL1, now_ms};
 use ramaria_memory::job::JobType;
+use ramaria_storage::SqliteStorage;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -209,7 +214,7 @@ async fn l3_trigger_skips_without_events() {
     seed_persona(&storage, "char-0001").await;
 
     assert!(
-        !check_l3_trigger(&engine, None, "char-0001").await,
+        check_l3_trigger(&engine, None, "char-0001").await.is_none(),
         "无未吸收事件不应触发推断"
     );
 
@@ -246,7 +251,7 @@ async fn instant_check_zero_l3_days_disables_age_trigger() {
     storage.save_event(&event).await.expect("写入事件应成功");
 
     assert!(
-        !check_l3_trigger(&engine, None, "char-0001").await,
+        check_l3_trigger(&engine, None, "char-0001").await.is_none(),
         "时间线阈值 0 时不应按事件年龄触发推断"
     );
     let unabsorbed = storage
@@ -280,7 +285,7 @@ async fn instant_check_age_trigger_fires_when_days_enabled() {
     storage.save_event(&event).await.expect("写入事件应成功");
 
     assert!(
-        check_l3_trigger(&engine, None, "char-0001").await,
+        check_l3_trigger(&engine, None, "char-0001").await.is_some(),
         "时间线阈值大于 0 且事件超龄时应触发推断"
     );
 
@@ -309,7 +314,7 @@ async fn instant_check_count_trigger_ignores_disabled_age_line() {
     storage.save_event(&event).await.expect("写入事件应成功");
 
     assert!(
-        check_l3_trigger(&engine, None, "char-0001").await,
+        check_l3_trigger(&engine, None, "char-0001").await.is_some(),
         "时间线关闭不影响计数线：达计数阈值即触发"
     );
 
@@ -758,6 +763,128 @@ async fn scheduled_check_l2_age_uses_occurred_at() {
         .await
         .expect("查询事件应成功");
     assert!(!events.is_empty(), "触发提取应有事件产出（降级事件亦可）");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// =========================================================
+// 级联入口（无桌面批处理）
+// =========================================================
+
+/// L2 事件提取的规范回复（工作 / 加班主题）。
+const CASCADE_L2_EVENT_JSON: &str = r#"{"events": [{"title": "频繁加班", "summary": "用户最近工作压力很大，经常加班到深夜", "keywords": "工作,加班", "confidence": 0.9}]}"#;
+
+/// L3 推断 Step1 回复（分类信号 JSON 对象）。
+const CASCADE_L3_STEP1_JSON: &str = r#"{"工作": {"signal_label": "工作-持续投入", "evidence_citation": "n_eff=1.0", "stability_judgment": "stable", "sufficient_evidence": true}}"#;
+
+/// L3 推断 Step2 回复（跨分类一致性 JSON 对象）。
+const CASCADE_L3_STEP2_JSON: &str = r#"{"base_candidates": [], "primary_candidates": ["工作"], "accent_candidates": [], "notes": ""}"#;
+
+/// L3 推断 Step3 回复（结构化画像 JSON 数组）。
+const CASCADE_L3_STEP3_JSON: &str = r#"[{"layer": "primary", "trait_label": "工作-持续投入", "meaning": "对工作保持持续投入", "confidence": 0.72}]"#;
+
+/// 装配级联用例引擎：单次即触发的 L2 / L3 阈值 + 按序回复的脚本化 LLM。
+async fn cascade_engine(tag: &str, replies: &[&str]) -> (Engine, Arc<SqliteStorage>, PathBuf) {
+    let mut config = RamariaConfig::default();
+    config.thresholds.l2_trigger_count = 1;
+    config.thresholds.l3_trigger_count = 1;
+    // 测试不等待簇间节流（生产默认 800ms）
+    config.thresholds.cluster_delay_ms = 0;
+    let llm = Arc::new(ScriptedLlm::replies(replies));
+    engine_with_shared_scripted_llm(tag, llm, config, None).await
+}
+
+/// 造 3 条同关键词的未吸收 L1（关键词连通 → 单簇单次提取）。
+async fn seed_cascade_l1(storage: &SqliteStorage) {
+    for i in 0..3 {
+        seed_l1(
+            storage,
+            "char-0001",
+            "用户最近工作压力很大，常常加班到深夜",
+            Some("工作压力"),
+            1_000 + i,
+        )
+        .await;
+    }
+}
+
+/// 级联到 L3：L1 全量消费、事件产出、活跃标签写入，两类未吸收集合均清空。
+#[tokio::test]
+async fn cascade_consumes_l1_to_l3_and_reports_counts() {
+    let (engine, storage, dir) = cascade_engine(
+        "cascade-l3",
+        &[
+            CASCADE_L2_EVENT_JSON,
+            CASCADE_L3_STEP1_JSON,
+            CASCADE_L3_STEP2_JSON,
+            CASCADE_L3_STEP3_JSON,
+        ],
+    )
+    .await;
+    seed_persona(&storage, "char-0001").await;
+    seed_cascade_l1(&storage).await;
+
+    let outcome = engine
+        .cascade("char-0001", CascadeUntil::L3)
+        .await
+        .expect("级联应成功");
+
+    assert_eq!(outcome.persona_uid, "char-0001");
+    assert_eq!(outcome.l1_consumed, 3, "三条未吸收 L1 应全部被消费");
+    assert!(
+        outcome.l2_events >= 1,
+        "应产出至少一条事件: {}",
+        outcome.l2_events
+    );
+    assert!(
+        outcome.l3_traits >= 1,
+        "应写入至少一个活跃标签: {}",
+        outcome.l3_traits
+    );
+
+    let unabsorbed_l1 = storage
+        .list_unabsorbed_l1("char-0001")
+        .await
+        .expect("查询未吸收 L1 应成功");
+    assert!(
+        unabsorbed_l1.is_empty(),
+        "级联后不应残留未吸收 L1: {unabsorbed_l1:?}"
+    );
+    let unabsorbed_events = storage
+        .list_unabsorbed_events("char-0001")
+        .await
+        .expect("查询未吸收事件应成功");
+    assert!(
+        unabsorbed_events.is_empty(),
+        "L3 应吸收本轮全部事件: {unabsorbed_events:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 级联到 L2：只做事件提取，不产标签，事件保持未吸收。
+#[tokio::test]
+async fn cascade_until_l2_skips_l3() {
+    let (engine, storage, dir) = cascade_engine("cascade-l2", &[CASCADE_L2_EVENT_JSON]).await;
+    seed_persona(&storage, "char-0001").await;
+    seed_cascade_l1(&storage).await;
+
+    let outcome = engine
+        .cascade("char-0001", CascadeUntil::L2)
+        .await
+        .expect("级联应成功");
+
+    assert_eq!(outcome.l1_consumed, 3, "三条未吸收 L1 应全部被消费");
+    assert_eq!(outcome.l3_traits, 0, "until=L2 不应产出 L3 标签");
+
+    let unabsorbed_events = storage
+        .list_unabsorbed_events("char-0001")
+        .await
+        .expect("查询未吸收事件应成功");
+    assert!(
+        !unabsorbed_events.is_empty(),
+        "L3 未运行，事件应保持未吸收: {unabsorbed_events:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

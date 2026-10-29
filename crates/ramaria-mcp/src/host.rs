@@ -2,6 +2,7 @@
 //!
 //! 设计特点:
 //! - 宿主职责：装配服务层引擎 → 注入召回策略与默认封存钩子 → 拉起空闲检查 → 以 stdio 提供服务
+//! - 索引预热：启动时拉起一次后台构建（不阻塞首问），构建期间召回走存储直读 BM25 降级
 //! - 策略注入：`[mcp]` 的原文开关与人格白名单转成 `RecallPolicy` 进入服务层强制执行
 //! - 钩子注入：注册与传输无关的默认封存钩子（行为 / 风格 / L2 触发，不依赖 app）
 //! - 空闲检查：进程内按 `[session].idle_check_interval_seconds` 自动封存超时会话
@@ -112,6 +113,12 @@ pub async fn serve_stdio(options: McpHostOptions) -> RamariaResult<()> {
 
     // ---- 3. 默认封存钩子（行为 / 风格 / L2 触发；MCP 进程不依赖 app） ----
     engine.set_seal_hooks(default_seal_hooks(&engine));
+
+    // ---- 3b. 后台索引构建：首问不阻塞，长驻进程在构建完成后拿到完整索引 ----
+    // 与召回侧的降级路径配合：构建期间召回走存储直读 BM25，构建完成后整体替换。
+    if !engine.start_index_build() {
+        tracing::debug!("索引构建已在途，启动期构建请求已忽略");
+    }
 
     // ---- 4. 进程内空闲检查（超时会话生成 L1，与桌面同一空闲口径）----
     // 门禁:

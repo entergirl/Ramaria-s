@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - 由 recall 模块以 `#[cfg(test)] mod tests;` 收纳：覆盖策略口径 / 检索输入解析 /
-//!   检索模式 / 概览模式 / 知识层五组路径
+//!   检索模式 / 概览模式 / 知识层 / 检索通道开关（关向量与索引降级）各组路径
 //! - 使用 mock LLM 与真实 SQLite 临时库，断言以召回结果结构与落库状态为准
 //! - 未配置嵌入（确定性 BM25 路径），不依赖网络与模型文件
 //!
@@ -12,14 +12,16 @@
 use super::entry::resolve_query;
 use super::*;
 use crate::test_support::{
-    MockLlm, engine_with_db, engine_with_llm_and_config, seed_l1 as seed_l1_raw, seed_persona,
-    seed_persona_kind,
+    CountingEmbedding, MockLlm, engine_with_db, engine_with_llm_and_config,
+    engine_with_llm_config_and_embedding, seed_l1 as seed_l1_raw, seed_persona, seed_persona_kind,
+    seed_session_with_messages, seed_utt_block,
 };
 use crate::types::{ChatRole, ChatTurn, RecallLayer, RecallMode, RecallRequest};
 use ramaria_core::config::RamariaConfig;
-use ramaria_core::traits::StoreCrud;
-use ramaria_core::types::{FactSource, FactTier, PersonaKind, ProfileField};
+use ramaria_core::traits::{EmbeddingProvider, StoreCrud};
+use ramaria_core::types::{FactSource, FactTier, IndexStatus, PersonaKind, ProfileField};
 use ramaria_storage::SqliteStorage;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// 造一条 L1（默认不带关键词；BM25 直接命中摘要文本）。
@@ -643,6 +645,109 @@ async fn overview_timeline_uses_occurred_at_and_event_start() {
             .timestamp_millis(),
         8_000,
         "L2 时间线应取事件开始时间"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// =========================================================
+// 检索通道开关（关向量 / 索引未就绪）
+// =========================================================
+
+/// 关向量：即使嵌入可用也不产生任何查询 / 词条嵌入，utt 通道随 query_vec=None 退化。
+#[tokio::test]
+async fn enable_vector_false_makes_zero_embedding_calls() {
+    let mut config = RamariaConfig::default();
+    config.retrieval.enable_vector = false;
+    let embedding = Arc::new(CountingEmbedding::new());
+    let provider: Arc<dyn EmbeddingProvider> = embedding.clone();
+    let (engine, storage, dir) = engine_with_llm_config_and_embedding(
+        "recall-no-vector",
+        MockLlm::local(),
+        config,
+        Some(provider),
+    )
+    .await;
+    seed_persona(&storage, "char-0001").await;
+    seed_l1(
+        &storage,
+        "char-0001",
+        "用户最近工作压力很大，常常加班到深夜",
+        1_000,
+    )
+    .await;
+    // 原文块（persona 类型在白名单内，utt 闸门生效——不修开关时该路径会生成查询向量）
+    let session_id = seed_session_with_messages(&storage, "char-0001", 2, 1_000).await;
+    seed_utt_block(&storage, session_id, "char-0001", "他说最近工作压力很大").await;
+    // 先加载索引：本用例度量已加载索引上的召回，关向量时构建本身也不得产生嵌入
+    engine.ensure_index_loaded().await.expect("索引加载应成功");
+
+    let result = engine
+        .recall(RecallRequest {
+            query: Some("工作压力".to_string()),
+            persona: Some("char-0001".to_string()),
+            include: Some(vec![RecallLayer::L1, RecallLayer::Raw]),
+            ..RecallRequest::default()
+        })
+        .await
+        .expect("召回成功");
+
+    assert_eq!(embedding.embed_calls(), 0, "关向量时不应有单条嵌入调用");
+    assert_eq!(embedding.batch_calls(), 0, "关向量时不应有批量嵌入调用");
+    assert_eq!(
+        result.stats.channels.get("vector"),
+        Some(&0),
+        "向量通道不应有命中: {:?}",
+        result.stats.channels
+    );
+    assert!(
+        !result.items.is_empty(),
+        "BM25 通道仍应命中文档: {:?}",
+        result.items
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 索引构建中：召回改走存储直读 BM25，命中记忆且不改写索引状态。
+#[tokio::test]
+async fn recall_degrades_to_storage_bm25_while_index_building() {
+    let (engine, storage, dir) = engine_with_db("recall-building").await;
+    seed_persona(&storage, "char-0001").await;
+    seed_l1(
+        &storage,
+        "char-0001",
+        "用户最近工作压力很大，常常加班到深夜",
+        1_000,
+    )
+    .await;
+    engine.set_index_status(IndexStatus::Building, 0, 1, 0, None, None);
+
+    let result = engine
+        .recall(RecallRequest {
+            query: Some("工作压力".to_string()),
+            persona: Some("char-0001".to_string()),
+            include: Some(vec![RecallLayer::L1]),
+            ..RecallRequest::default()
+        })
+        .await
+        .expect("召回成功");
+
+    assert!(
+        !result.items.is_empty(),
+        "索引未就绪时应用存储直读 BM25 出召回: {:?}",
+        result.items
+    );
+    assert!(
+        result.items[0].text.contains("工作压力"),
+        "命中条目应含查询关键词: {}",
+        result.items[0].text
+    );
+    assert!(!engine.is_retriever_loaded(), "召回不应触发索引构建");
+    assert_eq!(
+        engine.index_status().status,
+        IndexStatus::Building,
+        "召回不应改写索引状态"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

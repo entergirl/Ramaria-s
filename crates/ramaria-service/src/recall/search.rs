@@ -6,6 +6,8 @@
 //! - 记忆条目按 include 逐层过滤，保证"未请求的分层不出现"
 //! - 预算裁剪：context 按字符边界截断、items 按条数上限截断，均标记 stats.truncated
 //! - 嵌入 provider 取快照后在锁外使用（未配置 → 向量通道降级，走 BM25 + 关键词镜像）
+//! - 索引降级：未就绪时用存储直读 BM25 出召回（不触发构建、不改索引状态）；
+//!   已加载时沿用懒加载 + 代次刷新口径
 
 use ramaria_core::error::RamariaResult;
 use ramaria_core::types::now_ms;
@@ -34,10 +36,21 @@ pub(super) async fn search(
     max_items: usize,
     max_chars: usize,
 ) -> RamariaResult<RecallResult> {
-    // 懒加载索引（首次召回构建；失败只记 warn，检索按空记忆返回，不阻塞调用方）
-    if let Err(e) = engine.ensure_index_loaded().await {
-        tracing::warn!(error = %e, "索引加载失败，本次召回继续（可能无记忆注入）");
-    }
+    // 索引未就绪时的首问降级：不进构建路径（不改索引状态），用存储直读 BM25 出召回；
+    // 已加载路径沿用懒加载 / 代次刷新口径（构建失败只记 warn，检索按空记忆继续）。
+    let slot = engine.retriever_slot();
+    let fallback = if engine.is_retriever_loaded() {
+        if let Err(e) = engine.ensure_index_loaded().await {
+            tracing::warn!(error = %e, "索引加载失败，本次召回继续（可能无记忆注入）");
+        }
+        None
+    } else {
+        crate::index::fallback::bm25_only_retriever(engine, persona).await
+    };
+    let retriever = match fallback.as_ref() {
+        Some(retriever) => crate::index::fallback::RecallRetriever::Fallback(retriever),
+        None => crate::index::fallback::RecallRetriever::Slot(&slot),
+    };
 
     let config = engine.config();
     let wants = |layer: RecallLayer| include.contains(&layer);
@@ -50,12 +63,11 @@ pub(super) async fn search(
     }
     // 嵌入 provider 取快照后在锁外使用（未配置 → 向量通道降级，检索走 BM25 + 关键词镜像）
     let embedding = engine.embedding_ref();
-    let retriever = engine.retriever_slot();
     let keyword_mirror = engine.keyword_mirror();
     // 人格类型按 persona 行显式解析（行缺失 / 读取失败 → None，共用召回内部保守降级）
     let persona_kind = super::resolve_persona_kind(engine.storage_ref().as_ref(), persona).await;
     let memory_output = assemble_recall(RecallInput {
-        retriever: &*retriever,
+        retriever: &retriever,
         keyword_mirror: &*keyword_mirror,
         storage: engine.storage_ref().as_ref(),
         embedding: embedding.as_deref(),
