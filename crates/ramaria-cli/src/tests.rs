@@ -11,7 +11,8 @@ use clap::Parser;
 use ramaria_core::traits::StoreInfrastructure;
 
 use crate::cli::{
-    Cli, Commands, CorpusCmd, EvalArgs, EvalCmd, ImportCmd, McpCmd, ProbeArgs, RuleCmd, StyleCmd,
+    BackendModeArg, Cli, Commands, CorpusCmd, EvalArgs, EvalCmd, ImportCmd, McpCmd, ProbeArgs,
+    RuleCmd, StyleCmd,
 };
 
 /// 串行化 env 变量测试（多个 #[test] 并行时会互相干扰环境变量）。
@@ -166,8 +167,11 @@ fn probe_baseline_window_hours_parses() {
 fn eval_subcommands_parse() {
     let cli = Cli::try_parse_from(["ramaria", "eval"]).expect("无参 eval 应可解析");
     match cli.command {
-        Commands::Eval(EvalArgs { command }) => {
-            assert!(command.is_none(), "无参 eval 不应有子命令")
+        Commands::Eval(EvalArgs {
+            command, backend, ..
+        }) => {
+            assert!(command.is_none(), "无参 eval 不应有子命令");
+            assert_eq!(backend, BackendModeArg::Inherit, "后端来源缺省继承");
         }
         _ => panic!("应解析为 Eval，实际解析为其他命令"),
     }
@@ -182,6 +186,7 @@ fn eval_subcommands_parse() {
                     matrix,
                     output,
                 }),
+            ..
         }) => {
             assert_eq!(corpus.as_deref(), Some("lifebench"));
             assert!(matrix.is_none(), "未给 --matrix 时保持缺省");
@@ -195,6 +200,7 @@ fn eval_subcommands_parse() {
     match cli.command {
         Commands::Eval(EvalArgs {
             command: Some(EvalCmd::Corpus(CorpusCmd::Fetch { name })),
+            ..
         }) => assert_eq!(name, "lifebench"),
         _ => panic!("应解析为 Eval::Corpus::Fetch，实际解析为其他命令"),
     }
@@ -204,8 +210,43 @@ fn eval_subcommands_parse() {
     match cli.command {
         Commands::Eval(EvalArgs {
             command: Some(EvalCmd::Score { run_id }),
+            ..
         }) => assert_eq!(run_id, "run-1"),
         _ => panic!("应解析为 Eval::Score，实际解析为其他命令"),
+    }
+}
+
+/// 无子命令时可解析后端来源与独立配置参数。
+#[test]
+fn eval_backend_options_parse() {
+    let cli = Cli::try_parse_from([
+        "ramaria",
+        "eval",
+        "--backend",
+        "cloud",
+        "--base-url",
+        "https://cloud.example/v1",
+        "--model",
+        "model-a",
+        "--embedding-path",
+        "models/bge",
+    ])
+    .expect("后端参数应可解析");
+    match cli.command {
+        Commands::Eval(EvalArgs {
+            command,
+            backend,
+            base_url,
+            model,
+            embedding_path,
+        }) => {
+            assert!(command.is_none(), "后端参数只用于无子命令沙盒");
+            assert_eq!(backend, BackendModeArg::Cloud);
+            assert_eq!(base_url.as_deref(), Some("https://cloud.example/v1"));
+            assert_eq!(model.as_deref(), Some("model-a"));
+            assert_eq!(embedding_path, Some(PathBuf::from("models/bge")));
+        }
+        _ => panic!("应解析为 Eval"),
     }
 }
 

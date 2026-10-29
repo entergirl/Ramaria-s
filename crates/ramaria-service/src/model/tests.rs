@@ -322,6 +322,46 @@ async fn write_backend_config_missing_config_path_keeps_db() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 跨库只读读取：已落库配置原样读回；库文件不存在按"无配置"返回。
+#[tokio::test]
+async fn read_backend_config_at_reads_saved_config_and_tolerates_missing_file() {
+    let (engine, storage, dir) = engine_with_db("model-read-backend").await;
+
+    let mut config = BackendConfig::lm_studio_default();
+    config.base_url = "http://localhost:4321/v1".to_string();
+    config.capability.base_url = "http://localhost:4321/v1".to_string();
+    config.capability.model_id = "qwen-read".to_string();
+    config.embedding_model_path = Some("models/bge".to_string());
+    storage
+        .save_backend_config(&config)
+        .await
+        .expect("保存后端配置应成功");
+
+    let read = read_backend_config_at(engine.db_path())
+        .await
+        .expect("只读读取应成功")
+        .expect("应读到已保存的配置");
+    assert_eq!(read.capability.model_id, "qwen-read");
+    assert_eq!(read.base_url, "http://localhost:4321/v1");
+    assert_eq!(read.embedding_model_path.as_deref(), Some("models/bge"));
+
+    // 缺库文件：不建库、不报错
+    let missing = dir.join("not-created.db");
+    assert!(
+        read_backend_config_at(&missing)
+            .await
+            .expect("缺文件应返回 Ok")
+            .is_none(),
+        "缺文件应视为无配置"
+    );
+    assert!(!missing.exists(), "只读读取不应创建库文件");
+
+    if let Some(pool) = engine.sqlite_pool() {
+        pool.close().await;
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // =========================================================
 // 嵌入模型保存与热更新
 // =========================================================

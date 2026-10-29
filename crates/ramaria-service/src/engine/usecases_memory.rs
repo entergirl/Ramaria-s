@@ -20,7 +20,8 @@ use crate::stream_event::ChatStreamHandle;
 use crate::types::{
     CascadeOutcome, CascadeUntil, ChannelImageOutcome, ChatSendOutcome, ChatSendRequest,
     ChatStreamRequest, HistoryRequest, HistoryResult, IngestOutcome, IngestRequest,
-    LocalImageSendOutcome, LocalImageSendRequest, RecallRequest, RecallResult, SealOutcome,
+    LocalImageSendOutcome, LocalImageSendRequest, RecallRequest, RecallResult, RecallWithTrace,
+    SealOutcome,
 };
 
 use super::Engine;
@@ -42,6 +43,19 @@ impl Engine {
     /// - 目标人格不在策略白名单时返回 `Privacy` 错误（越权可见性拒绝）。
     pub async fn recall(&self, req: RecallRequest) -> RamariaResult<RecallResult> {
         crate::recall::run(self, req).await
+    }
+
+    /// 带轨迹召回用例：与 [`Engine::recall`] 同一份实现，额外返回诊断轨迹。
+    ///
+    /// 说明:
+    /// - 概览模式（无检索输入）不产生检索轨迹，返回默认轨迹；
+    /// - 轨迹只记标识、分数与字符数，不含查询文本与记忆原文；
+    /// - 产品路径不调用本用例，普通召回不采集轨迹。
+    ///
+    /// 返回:
+    /// - 成功时返回召回结果与分阶段轨迹；策略拒绝与召回错误与 [`Engine::recall`] 一致。
+    pub async fn recall_with_trace(&self, req: RecallRequest) -> RamariaResult<RecallWithTrace> {
+        crate::recall::run_traced(self, req).await
     }
 
     /// 生成用例：以指定人格回复一条消息（记忆检索 + 五段式装配 + LLM）。

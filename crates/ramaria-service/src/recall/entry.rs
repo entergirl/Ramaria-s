@@ -5,11 +5,13 @@
 //! - 检索输入判定：显式 `query` > 最后一条用户消息 → 检索模式；两者皆空 → 概览模式
 //! - 归一化口径与在线管线一致：人格 uid 空串视为缺省、空白 query 视为无输入
 //! - 只做分流与参数归一化：检索装配见 `search`，时间线装配见 `overview`
+//! - 轨迹可选：同一实现按需采集诊断轨迹，默认入口不构造轨迹数据
 
 use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_memory::trace::RecallTrace;
 
 use crate::engine::Engine;
-use crate::types::{DEFAULT_PERSONA_UID, RecallRequest, RecallResult};
+use crate::types::{DEFAULT_PERSONA_UID, RecallRequest, RecallResult, RecallWithTrace};
 
 use super::overview::overview;
 use super::search::search;
@@ -35,6 +37,38 @@ use super::search::search;
 /// 返回:
 /// - 成功时返回 `context`（可直接拼接的段落文本）、`items`（结构化明细）与 `stats`。
 pub(crate) async fn run(engine: &Engine, req: RecallRequest) -> RamariaResult<RecallResult> {
+    run_inner(engine, req, None).await
+}
+
+/// 执行召回用例并采集诊断轨迹。
+///
+/// 说明:
+/// - 与 [`run`] 同一份实现：策略校验、请求归一化与模式分流完全一致；
+/// - 概览模式（无检索输入）不产生检索轨迹，返回默认轨迹；
+/// - 轨迹只记标识、分数与字符数，不含查询文本与记忆原文。
+///
+/// 返回:
+/// - 成功时返回召回结果与轨迹；错误语义与 [`run`] 一致。
+pub(crate) async fn run_traced(
+    engine: &Engine,
+    req: RecallRequest,
+) -> RamariaResult<RecallWithTrace> {
+    let mut trace = RecallTrace::default();
+    let result = run_inner(engine, req, Some(&mut trace)).await?;
+    Ok(RecallWithTrace { result, trace })
+}
+
+/// 召回用例的统一实现（可选写入诊断轨迹）。
+///
+/// 参数:
+/// - `engine`: 服务层引擎（存储 / 配置 / 检索槽 / 策略）；
+/// - `req`: 召回请求（对话片段 / 人格 / 分层 / 预算）；
+/// - `trace`: 传 `Some` 时由检索模式写入轨迹；概览模式忽略该参数。
+async fn run_inner(
+    engine: &Engine,
+    req: RecallRequest,
+    trace: Option<&mut RecallTrace>,
+) -> RamariaResult<RecallResult> {
     let policy = engine.recall_policy();
     let persona = normalize_persona(req.persona.as_deref());
     if !policy.persona_allowed(&persona) {
@@ -62,7 +96,7 @@ pub(crate) async fn run(engine: &Engine, req: RecallRequest) -> RamariaResult<Re
         "召回检索模式开始"
     );
     search(
-        engine, &policy, &persona, &include, &query, max_items, max_chars,
+        engine, &policy, &persona, &include, &query, max_items, max_chars, trace,
     )
     .await
 }

@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
+use ramaria_memory::trace::RecallTrace;
 use serde::{Deserialize, Serialize};
 
 use super::chat::ChatTurn;
@@ -193,4 +194,19 @@ pub struct RecallResult {
     pub context: String,
     pub items: Vec<RecallItem>,
     pub stats: RecallStats,
+}
+
+/// 带诊断轨迹的召回结果。
+///
+/// 职责:
+/// - 把一次召回的装配结果与分阶段诊断轨迹成对返回，供评估侧读取召回链路；
+///   产品路径只消费 [`RecallResult`]，不构造轨迹。
+///
+/// 字段约定:
+/// - `result`: 与 `Engine::recall` 同源同值的召回结果；
+/// - `trace`: 召回各阶段的标识 / 分数 / 字符数，不含查询文本与记忆原文。
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecallWithTrace {
+    pub result: RecallResult,
+    pub trace: RecallTrace,
 }

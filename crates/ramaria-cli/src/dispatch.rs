@@ -6,17 +6,18 @@
 //! - 全局 `--json` / `--yes` 经此透传到命令模块，交互式与批量行为一致
 //! - 参数校验类错误以 `RamariaError::Validation` 返回，由入口统一映射退出码
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use ramaria_cli::commands;
-use ramaria_core::error::RamariaError;
-use ramaria_eval::EvalCommand;
+use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_eval::{EvalCommand, EvalContext, SandboxBackendChoice, SandboxModelKind};
 use ramaria_service::Engine;
 
 use crate::cli::{
-    BlocksCmd, ChannelCmd, Cli, Commands, ConfigCmd, CorpusCmd, EvalArgs, EvalCmd, FactCmd,
-    ImportCmd, IndexCmd, KeywordAliasCmd, KeywordCmd, PersonaCmd, ProbeArgs, RuleCmd, SessionCmd,
-    StickerCmd, StyleCmd,
+    BackendModeArg, BlocksCmd, ChannelCmd, Cli, Commands, ConfigCmd, CorpusCmd, EvalArgs, EvalCmd,
+    FactCmd, ImportCmd, IndexCmd, KeywordAliasCmd, KeywordCmd, PersonaCmd, ProbeArgs, RuleCmd,
+    SessionCmd, StickerCmd, StyleCmd,
 };
 
 /// 评测参数 → 评测层命令（纯映射，不触碰引擎与文件系统）。
@@ -58,6 +59,60 @@ pub(crate) fn eval_command(args: &EvalArgs) -> Option<EvalCommand> {
         },
     };
     Some(mapped)
+}
+
+/// 评测参数 → 评测运行上下文（后端来源与用户库路径）。
+///
+/// 参数:
+/// - `args`: clap 解析出的评测参数组；
+/// - `user_db`: 用户库路径，供继承来源读取后端配置。
+///
+/// 返回:
+/// - 无子命令时返回本次沙盒的后端来源选择；
+/// - 子命令带后端参数、或继承来源带独立配置参数时返回 `Validation`。
+pub(crate) fn eval_context(args: &EvalArgs, user_db: PathBuf) -> RamariaResult<EvalContext> {
+    let has_independent =
+        args.base_url.is_some() || args.model.is_some() || args.embedding_path.is_some();
+
+    if args.command.is_some() {
+        if args.backend != BackendModeArg::Inherit || has_independent {
+            return Err(RamariaError::validation(
+                "eval 子命令不接受后端参数：后端来源只对无子命令的沙盒生效",
+            ));
+        }
+        return Ok(EvalContext {
+            user_db: Some(user_db),
+            backend: SandboxBackendChoice::Inherit,
+        });
+    }
+
+    let backend = match args.backend {
+        BackendModeArg::Inherit => {
+            if has_independent {
+                return Err(RamariaError::validation(
+                    "继承模式不接受独立配置参数：先用 --backend local 或 --backend cloud",
+                ));
+            }
+            SandboxBackendChoice::Inherit
+        }
+        BackendModeArg::Local | BackendModeArg::Cloud => {
+            let kind = match args.backend {
+                BackendModeArg::Local => SandboxModelKind::Local,
+                _ => SandboxModelKind::Cloud,
+            };
+            SandboxBackendChoice::Independent {
+                kind,
+                base_url: args.base_url.clone().unwrap_or_default(),
+                model_id: args.model.clone().unwrap_or_default(),
+                embedding_model_path: args.embedding_path.clone(),
+            }
+        }
+    };
+
+    Ok(EvalContext {
+        user_db: Some(user_db),
+        backend,
+    })
 }
 
 // =========================================================
@@ -508,4 +563,85 @@ pub(crate) async fn dispatch(engine: &Arc<Engine>, cli: Cli) -> anyhow::Result<(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造只带子命令的评测参数，其余字段取缺省。
+    fn args(command: Option<EvalCmd>) -> EvalArgs {
+        EvalArgs {
+            backend: BackendModeArg::Inherit,
+            base_url: None,
+            model: None,
+            embedding_path: None,
+            command,
+        }
+    }
+
+    /// 无参数时继承当前配置，并带上用户库路径。
+    #[test]
+    fn eval_context_defaults_to_inherit() {
+        let context = eval_context(&args(None), PathBuf::from("u.db")).expect("应构造成功");
+        assert_eq!(context.user_db, Some(PathBuf::from("u.db")));
+        assert_eq!(context.backend, SandboxBackendChoice::Inherit);
+    }
+
+    /// 本地来源允许空地址与空模型，交给沙盒默认地址与自动选择。
+    #[test]
+    fn eval_context_maps_local_without_address_or_model() {
+        let mut eval = args(None);
+        eval.backend = BackendModeArg::Local;
+        let context = eval_context(&eval, PathBuf::from("u.db")).expect("应构造成功");
+        assert_eq!(
+            context.backend,
+            SandboxBackendChoice::Independent {
+                kind: SandboxModelKind::Local,
+                base_url: String::new(),
+                model_id: String::new(),
+                embedding_model_path: None,
+            }
+        );
+    }
+
+    /// 云端来源透传地址、模型与向量目录。
+    #[test]
+    fn eval_context_maps_cloud_independent_fields() {
+        let mut eval = args(None);
+        eval.backend = BackendModeArg::Cloud;
+        eval.base_url = Some("https://cloud.example/v1".to_string());
+        eval.model = Some("model-a".to_string());
+        eval.embedding_path = Some(PathBuf::from("models/bge"));
+        let context = eval_context(&eval, PathBuf::from("u.db")).expect("应构造成功");
+        assert_eq!(
+            context.backend,
+            SandboxBackendChoice::Independent {
+                kind: SandboxModelKind::Cloud,
+                base_url: "https://cloud.example/v1".to_string(),
+                model_id: "model-a".to_string(),
+                embedding_model_path: Some(PathBuf::from("models/bge")),
+            }
+        );
+    }
+
+    /// 继承来源与独立配置参数互斥。
+    #[test]
+    fn eval_context_rejects_independent_options_in_inherit_mode() {
+        let mut eval = args(None);
+        eval.model = Some("model-a".to_string());
+        let error = eval_context(&eval, PathBuf::from("u.db")).expect_err("应拒绝");
+        assert!(matches!(&error, RamariaError::Validation { .. }));
+    }
+
+    /// 子命令不接受后端参数：后端来源只服务无子命令沙盒。
+    #[test]
+    fn eval_context_rejects_backend_options_with_subcommand() {
+        let mut eval = args(Some(EvalCmd::Score {
+            run_id: "r".to_string(),
+        }));
+        eval.backend = BackendModeArg::Cloud;
+        let error = eval_context(&eval, PathBuf::from("u.db")).expect_err("应拒绝");
+        assert!(matches!(&error, RamariaError::Validation { .. }));
+    }
 }

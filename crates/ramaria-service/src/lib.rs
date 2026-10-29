@@ -7,6 +7,7 @@
 //! - 请求与响应为纯数据结构（`types` 模块），不出现 stdio / Tauri / HTTP 概念
 //! - 通道（channel / external_ref）是数据属性而非算法输入
 //! - 召回同源：记忆层检索复用 `ramaria_memory::recall`（在线管线同一份实现）
+//! - 召回诊断：召回用例可选择采集分阶段轨迹（标识 / 分数 / 字符数），产品路径不采集
 //! - 降级纪律：LLM / embedding 不可用时不阻塞装配与记忆读取
 //!
 //! 模块划分:
@@ -125,7 +126,8 @@ pub use lifecycle::{Lifecycle, LifecycleOptions};
 pub use model::{
     BackendConfigWriteOptions, BackendConfigWriteOutcome, ModelDownloadProgress, ModelDownloadSink,
     ModelDownloadStatus, RemoveModelOutcome, download_model, download_model_with_progress,
-    is_model_ready, list_models, model_size, models_root, remove_model, validate_embedding_model,
+    is_model_ready, list_models, model_size, models_root, read_backend_config_at, remove_model,
+    validate_embedding_model,
 };
 pub use persona::{PersonaLoadMode, PersonaRegenerateOutcome};
 // 预设类型 re-export：入口层（桌面）消费预览结构时经服务层取用，不新增直连 memory crate 的依赖
@@ -134,6 +136,11 @@ pub use proactive::{ProactiveMessage, ProactivePersonaView, ProactiveSink, Proac
 pub use ramaria_memory::preset::{PresetPreview, PreviewMode};
 // Token 估算 re-export：评测层按产品口径计量注入 token，不复制实现、不直连 memory
 pub use ramaria_memory::token_budget::estimate_tokens;
+// 召回轨迹 re-export：评估侧读取轨迹时经服务层取用，不新增直连 memory crate 的依赖
+pub use ramaria_memory::trace::{
+    BudgetTrace, ChannelCandidate, ChannelTrace, DropReason, DroppedTrace, FusedEntryTrace,
+    RecallTrace, RetrievalTrace, TraceChannel, UttTrace,
+};
 pub use recall::RecallPolicy;
 pub use seal::{SealHook, SealHooks};
 pub use settings::mask_api_key;
@@ -155,8 +162,8 @@ pub use types::{
     MAX_ITEMS_LIMIT, PendingAliasView, PersonaCardRequest, PersonaCardView, PersonaFileAction,
     PersonaFileOutcome, PersonaFullView, PersonaPromptPreview, PersonaSection, PersonaSummaryView,
     PersonaUpdateRequest, PersonalityProfileView, ProfileStatusView, PromptPreviewTier, RecallItem,
-    RecallLayer, RecallMode, RecallRequest, RecallResult, RecallStats, SealOutcome,
-    SessionBrowsePage, SessionBrowseRequest, SessionDetailView, SessionMessageView,
+    RecallLayer, RecallMode, RecallRequest, RecallResult, RecallStats, RecallWithTrace,
+    SealOutcome, SessionBrowsePage, SessionBrowseRequest, SessionDetailView, SessionMessageView,
     SessionMessagesRequest, SessionMessagesView, SessionSummaryView, SetupRequest, SetupStatus,
     StyleView, TraitDetailView, TraitEvidenceRequest, TraitEvidenceView, TraitView,
 };

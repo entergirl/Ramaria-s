@@ -1,7 +1,7 @@
 //! crates/ramaria-service/src/recall/search.rs - 检索模式分层装配与预算裁剪
 //!
 //! 设计特点:
-//! - 记忆层（L1/L2）走共用召回实现 `assemble_recall`（与在线管线同一份代码）
+//! - 记忆层（L1/L2）走共用召回实现 `assemble_recall_with`（与在线管线同一份代码，按需采集轨迹）
 //! - 分层装配顺序即注入优先级：行为 > 知识 > 表达 > 脉络 > 画像 > 记忆 > 原文
 //! - 记忆条目按 include 逐层过滤，保证"未请求的分层不出现"
 //! - 预算裁剪：context 按字符边界截断、items 按条数上限截断，均标记 stats.truncated
@@ -11,7 +11,10 @@
 
 use ramaria_core::error::RamariaResult;
 use ramaria_core::types::now_ms;
-use ramaria_memory::recall::{RecallGates, RecallInput, RecallMemoryLayers, assemble_recall};
+use ramaria_memory::recall::{
+    RecallGates, RecallInput, RecallMemoryLayers, RecallOptions, assemble_recall_with,
+};
+use ramaria_memory::trace::RecallTrace;
 
 use crate::engine::Engine;
 use crate::types::{RecallItem, RecallLayer, RecallMode, RecallResult, RecallStats};
@@ -35,6 +38,7 @@ pub(super) async fn search(
     query: &str,
     max_items: usize,
     max_chars: usize,
+    trace: Option<&mut RecallTrace>,
 ) -> RamariaResult<RecallResult> {
     // 索引未就绪时的首问降级：不进构建路径（不改索引状态），用存储直读 BM25 出召回；
     // 已加载路径沿用懒加载 / 代次刷新口径（构建失败只记 warn，检索按空记忆继续）。
@@ -66,28 +70,31 @@ pub(super) async fn search(
     let keyword_mirror = engine.keyword_mirror();
     // 人格类型按 persona 行显式解析（行缺失 / 读取失败 → None，共用召回内部保守降级）
     let persona_kind = super::resolve_persona_kind(engine.storage_ref().as_ref(), persona).await;
-    let memory_output = assemble_recall(RecallInput {
-        retriever: &retriever,
-        keyword_mirror: &*keyword_mirror,
-        storage: engine.storage_ref().as_ref(),
-        embedding: embedding.as_deref(),
-        query,
-        persona_uid: Some(persona),
-        persona_kind,
-        retrieval: &config.retrieval,
-        decay: &config.decay,
-        utt: &config.utt,
-        gates: RecallGates {
-            memory_rag: memory_wanted,
-            utt: raw_allowed,
+    let memory_output = assemble_recall_with(
+        RecallInput {
+            retriever: &retriever,
+            keyword_mirror: &*keyword_mirror,
+            storage: engine.storage_ref().as_ref(),
+            embedding: embedding.as_deref(),
+            query,
+            persona_uid: Some(persona),
+            persona_kind,
+            retrieval: &config.retrieval,
+            decay: &config.decay,
+            utt: &config.utt,
+            gates: RecallGates {
+                memory_rag: memory_wanted,
+                utt: raw_allowed,
+            },
+            // 摘要路子层开关：include 只含 l1 时记忆段与条目都不含 L2（反之亦然）
+            memory_layers: RecallMemoryLayers {
+                l1: wants(RecallLayer::L1),
+                l2: wants(RecallLayer::L2),
+            },
+            now_ms: now_ms(),
         },
-        // 摘要路子层开关：include 只含 l1 时记忆段与条目都不含 L2（反之亦然）
-        memory_layers: RecallMemoryLayers {
-            l1: wants(RecallLayer::L1),
-            l2: wants(RecallLayer::L2),
-        },
-        now_ms: now_ms(),
-    })
+        RecallOptions { trace },
+    )
     .await;
 
     // ---- 分层装配（顺序即注入优先级） ----

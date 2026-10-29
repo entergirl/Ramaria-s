@@ -17,7 +17,7 @@ mod eval;
 mod probe;
 mod setup;
 
-pub(crate) use eval::{CorpusCmd, EvalArgs, EvalCmd};
+pub(crate) use eval::{BackendModeArg, CorpusCmd, EvalArgs, EvalCmd};
 pub(crate) use probe::ProbeArgs;
 pub(crate) use setup::SetupArgs;
 

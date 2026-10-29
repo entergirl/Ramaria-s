@@ -33,11 +33,12 @@ mod dispatch;
 
 #[tokio::main]
 async fn main() {
-    // 初始化日志系统
-    init_tracing();
-
     // 使用分组帮助的 Command 解析（--help 按 对话/记忆/数据/管理/高级 分组）
     let cli = Cli::from_arg_matches(&grouped_command().get_matches()).unwrap_or_else(|e| e.exit());
+
+    // 评测命令默认关闭日志：服务层日志写 stderr，会在 TUI 备用屏幕上留下残影；
+    // 显式设置 RUST_LOG 时仍按用户配置输出。
+    init_tracing(matches!(&cli.command, Commands::Eval(_)));
 
     // 设置 --quiet（抑制 stderr 提示，仅错误）
     ui::set_quiet(cli.quiet);
@@ -63,7 +64,11 @@ async fn main() {
     // 评测命令：不经引擎初始化（评测只写评测根下的库与产物，不创建用户库与配置）。
     // 无参进入沙盒界面的分支由评测层决定表现形式；子命令在接入前返回 unsupported。
     if let Commands::Eval(args) = &cli.command {
-        match ramaria_eval::run(dispatch::eval_command(args)) {
+        let context = match dispatch::eval_context(args, cli.db.clone()) {
+            Ok(context) => context,
+            Err(e) => exit_with_error(&anyhow::Error::from(e), json_mode),
+        };
+        match ramaria_eval::run(dispatch::eval_command(args), context).await {
             Ok(()) => {}
             Err(e) => exit_with_error(&anyhow::Error::from(e), json_mode),
         }
@@ -326,12 +331,16 @@ fn backend_matches(active: &BackendConfig, synced: &BackendConfig) -> bool {
 // 日志初始化
 // =========================================================
 
-fn init_tracing() {
+fn init_tracing(eval_quiet: bool) {
     use tracing_subscriber::fmt::format::FmtSpan;
 
-    // 使用 RUST_LOG 环境变量控制日志级别，默认 info
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    // 使用 RUST_LOG 环境变量控制日志级别；评测命令未显式设置时关闭日志，
+    // 避免服务层日志写入 TUI 备用屏幕或污染行模式 stderr。
+    let filter = match tracing_subscriber::EnvFilter::try_from_default_env() {
+        Ok(filter) => filter,
+        Err(_) if eval_quiet => tracing_subscriber::EnvFilter::new("off"),
+        Err(_) => tracing_subscriber::EnvFilter::new("info"),
+    };
 
     // 日志必须走 stderr（stdout 只输出数据，保证管道/agent 取 stdout 即纯数据）
     tracing_subscriber::fmt()

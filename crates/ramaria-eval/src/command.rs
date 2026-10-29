@@ -2,13 +2,15 @@
 //!
 //! 设计特点:
 //! - 命令枚举只承载参数，不持有引擎与宿主句柄
-//! - 无参进入沙盒界面（沙盒未接入时给出提示），子命令未实现时返回 unsupported
-//! - 同步实现，不引入异步运行时；运行器接入时再调整签名
+//! - 无参进入沙盒界面（TTY 为 TUI，非 TTY 为行模式），子命令未实现时返回 unsupported
+//! - 异步实现：沙盒读写库与标准输入都需要运行时
 //! - 错误走 core 结构化错误，由入口层统一映射 exit code
 
 use std::path::PathBuf;
 
 use ramaria_core::error::{RamariaError, RamariaResult};
+
+use crate::EvalContext;
 
 /// 评测子命令。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,17 +72,15 @@ impl EvalCommand {
 /// 执行评测命令。
 ///
 /// 参数:
-/// - `command`: `None` 表示未给子命令（进入沙盒界面）。
+/// - `command`: `None` 表示未给子命令（进入沙盒界面）；
+/// - `context`: 宿主上下文（用户库路径等），透传给沙盒界面。
 ///
 /// 返回:
-/// - 无参：输出接入提示后返回 Ok；
+/// - 无参：TTY 下进入沙盒界面，非 TTY 读取标准输入并运行沙盒（报告写标准输出）；
 /// - 子命令：`Unsupported`（尚未实现）。
-pub fn run(command: Option<EvalCommand>) -> RamariaResult<()> {
+pub async fn run(command: Option<EvalCommand>, context: EvalContext) -> RamariaResult<()> {
     match command {
-        None => {
-            eprintln!("评测沙盒界面尚未接入；子命令见 `ramaria eval --help`");
-            Ok(())
-        }
+        None => crate::tui::run(context.user_db, context.backend).await,
         Some(command) => Err(RamariaError::unsupported(format!(
             "eval {} 尚未实现",
             command.name()
@@ -92,18 +92,16 @@ pub fn run(command: Option<EvalCommand>) -> RamariaResult<()> {
 mod tests {
     use super::*;
 
-    /// 无参进入沙盒分支：给出提示且不算失败。
-    #[test]
-    fn run_without_command_is_ok() {
-        assert!(run(None).is_ok());
-    }
-
     /// 子命令统一返回 unsupported，文案带子命令名。
-    #[test]
-    fn run_with_command_reports_unsupported() {
-        let err = run(Some(EvalCommand::CorpusFetch {
-            name: "lifebench".into(),
-        }))
+    #[tokio::test]
+    async fn run_with_command_reports_unsupported() {
+        let err = run(
+            Some(EvalCommand::CorpusFetch {
+                name: "lifebench".into(),
+            }),
+            EvalContext::default(),
+        )
+        .await
         .expect_err("子命令应返回 unsupported");
         assert!(
             matches!(&err, RamariaError::Unsupported { .. }),

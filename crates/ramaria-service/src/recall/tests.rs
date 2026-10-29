@@ -232,6 +232,73 @@ async fn search_mode_returns_context_and_items() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 服务层轨迹出口：带轨迹召回与普通召回结果同源，轨迹含四通道与条数预算。
+#[tokio::test]
+async fn recall_with_trace_records_channels_and_budget() {
+    let (engine, storage, dir) = engine_with_db("recall-trace").await;
+    seed_persona(&storage, "char-0001").await;
+    seed_l1(
+        &storage,
+        "char-0001",
+        "用户最近工作压力很大，常常加班",
+        1_000,
+    )
+    .await;
+    engine.ensure_index_loaded().await.expect("索引加载");
+
+    let req = RecallRequest {
+        query: Some("工作压力".to_string()),
+        persona: Some("char-0001".to_string()),
+        ..RecallRequest::default()
+    };
+    let plain = engine.recall(req.clone()).await.expect("普通召回成功");
+    let traced = engine.recall_with_trace(req).await.expect("带轨迹召回成功");
+
+    let plain_ids: Vec<&String> = plain.items.iter().map(|item| &item.id).collect();
+    let traced_ids: Vec<&String> = traced.result.items.iter().map(|item| &item.id).collect();
+    assert_eq!(traced_ids, plain_ids, "带轨迹召回的结果应与普通召回一致");
+    assert!(
+        plain.context.contains("工作压力"),
+        "普通召回上下文应含命中摘要: {}",
+        plain.context
+    );
+    assert!(
+        traced.result.context.contains("工作压力"),
+        "带轨迹召回上下文应含命中摘要: {}",
+        traced.result.context
+    );
+
+    assert_eq!(traced.trace.query_chars, "工作压力".chars().count());
+    assert_eq!(
+        traced.trace.retrieval.channels.len(),
+        4,
+        "轨迹应含四个检索通道"
+    );
+    assert!(
+        traced.trace.retrieval.channels.iter().any(|c| c.active),
+        "至少一个通道应参与融合"
+    );
+    let first = traced
+        .trace
+        .retrieval
+        .fused
+        .first()
+        .expect("融合轨迹应非空");
+    assert!(
+        first.id.starts_with("L1:"),
+        "融合首条应为 L1 文档: {}",
+        first.id
+    );
+    assert!(traced.trace.budget.max_memories > 0, "条数上限应已生效");
+    assert!(traced.trace.budget.kept >= 1, "至少保留一条候选");
+    assert!(
+        traced.trace.budget.tokens_after > 0,
+        "最终上下文应计入 token"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 分层开关：include 只含 knowledge 时不返回记忆层条目（也不触发检索）。
 #[tokio::test]
 async fn include_filters_layers() {

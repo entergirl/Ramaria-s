@@ -57,7 +57,9 @@ pub use persona::{
     PersonaPromptPreview, PersonaSection, PersonaSummaryView, PersonaUpdateRequest,
     PromptPreviewTier, StyleView, TraitView,
 };
-pub use recall::{RecallItem, RecallLayer, RecallMode, RecallRequest, RecallResult, RecallStats};
+pub use recall::{
+    RecallItem, RecallLayer, RecallMode, RecallRequest, RecallResult, RecallStats, RecallWithTrace,
+};
 pub use session::{
     ChannelOverviewView, HistoryMessageView, HistoryRequest, HistoryResult, SessionBrowsePage,
     SessionBrowseRequest, SessionDetailView, SessionMessageView, SessionMessagesRequest,

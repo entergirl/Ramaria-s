@@ -22,6 +22,7 @@ use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::EmbeddingProvider;
 use ramaria_core::types::{AppState, BackendConfig, LlmProvider};
 use ramaria_llm::model_manager::{ModelManager, ProgressCallback};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 use crate::engine::{Engine, build_llm_provider};
 use crate::types::{DegradedReason, EmbeddingModelView, EmbeddingValidation};
@@ -502,6 +503,61 @@ pub async fn download_model(
     let manager = ModelManager::new(models_root(root))?;
     tracing::info!(model_id, "开始下载嵌入模型");
     manager.download_model(model_id, progress).await
+}
+
+// =========================================================
+// 用户后端配置只读读取
+// =========================================================
+
+/// 只读读取用户库中保存的后端配置（不迁移、不写入）。
+///
+/// 参数:
+/// - `db_path`: 用户库文件路径（允许不存在）。
+///
+/// 返回:
+/// - `Ok(None)`: 库文件不存在，或库内没有后端配置行；
+/// - `Ok(Some(config))`: 库内单行配置解析成功；
+/// - `Err`: 只读打开 / 查询 / 解析失败（`Storage`）。
+///
+/// 说明:
+/// - 以只读连接打开且不建库：跨库读取不改变用户库形态，也不执行 migration；
+/// - 连接池在本函数内关闭，调用方不需要持有句柄；
+/// - 配置结构本身不含 API key，读取与错误文本都不触及密钥。
+pub async fn read_backend_config_at(db_path: &Path) -> RamariaResult<Option<BackendConfig>> {
+    if !db_path.exists() {
+        return Ok(None);
+    }
+
+    let options = SqliteConnectOptions::new()
+        .filename(db_path)
+        .read_only(true)
+        .create_if_missing(false);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .map_err(|error| RamariaError::storage_with_source("以只读方式打开用户库失败", error))?;
+
+    let outcome = read_backend_config_from_pool(&pool).await;
+    pool.close().await;
+    outcome
+}
+
+/// 在已建立的只读连接池上读取后端配置单行。
+async fn read_backend_config_from_pool(
+    pool: &sqlx::SqlitePool,
+) -> RamariaResult<Option<BackendConfig>> {
+    let data: Option<String> = sqlx::query_scalar("SELECT data FROM backend_config WHERE id = 1")
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| RamariaError::storage_with_source("读取用户后端配置失败", error))?;
+
+    let Some(data) = data else {
+        return Ok(None);
+    };
+    let config = serde_json::from_str(&data)
+        .map_err(|error| RamariaError::storage_with_source("解析用户后端配置失败", error))?;
+    Ok(Some(config))
 }
 
 // =========================================================

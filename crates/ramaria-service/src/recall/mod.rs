@@ -16,7 +16,7 @@
 //!
 //! 模块划分:
 //! - `policy`：召回隐私与边界策略（配置映射 / 链式覆盖 / 白名单判定）；
-//! - `entry`：用例入口（策略校验、请求归一化、检索 / 概览分流）；
+//! - `entry`：用例入口（策略校验、请求归一化、检索 / 概览分流、按需采集轨迹）；
 //! - `search`：检索模式分层装配与预算裁剪（记忆层共用召回）；
 //! - `overview`：概览模式时间线装配与渲染；
 //! - `layers`：各辅助分层读取与条目映射（行为 / 知识 / 风格 / 脉络 / 画像）；
@@ -34,8 +34,8 @@ use ramaria_core::types::PersonaKind;
 // 策略 re-export：`crate::recall::RecallPolicy` 为引擎与入口层既有调用路径
 pub use policy::RecallPolicy;
 
-// 用例入口 re-export：`crate::recall::run` 为引擎既有调用路径
-pub(crate) use entry::run;
+// 用例入口 re-export：`run` 为普通召回路径，`run_traced` 供带轨迹召回使用
+pub(crate) use entry::{run, run_traced};
 
 // =========================================================
 // 辅助
