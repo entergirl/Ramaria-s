@@ -600,6 +600,9 @@ impl StoreCrud for SqliteStorage {
     ) -> RamariaResult<Vec<PersonalityTrait>> {
         repo::traits::list_traits_by_persona(&self.pool, persona_uid).await
     }
+    async fn get_trait(&self, id: i64) -> RamariaResult<Option<PersonalityTrait>> {
+        repo::traits::get_by_id(&self.pool, id).await
+    }
     async fn update_trait_confidence(
         &self,
         id: i64,
@@ -650,6 +653,9 @@ impl StoreCrud for SqliteStorage {
     // =========================================================
     // Utt Blocks（原文话语块，v1.4）
     // =========================================================
+    async fn get_utt_block(&self, id: i64) -> RamariaResult<Option<UttBlock>> {
+        repo::utt_blocks::get_by_id(&self.pool, id).await
+    }
     async fn insert_utt_block(&self, block: &UttBlock) -> RamariaResult<i64> {
         repo::utt_blocks::insert(&self.pool, block).await
     }

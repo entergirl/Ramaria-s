@@ -9,13 +9,15 @@
 //! - 静默降级：嵌入不可用 → 向量通道缺席；镜像为空 → 关键词通道缺席；
 //!   索引未加载 → 空召回（不视为故障，也不阻塞调用方）
 //! - 隐私：不记录查询文本与记忆原文，日志只记计数、维度与字符数
+//! - 轨迹可选：`assemble_recall_with` 收 `RecallOptions`，传入时按阶段回填 `RecallTrace`，
+//!   默认入口不采集轨迹
 mod assemble;
 mod types;
 
-pub use assemble::{assemble_recall, current_now_ms};
+pub use assemble::{assemble_recall, assemble_recall_with, current_now_ms};
 pub use types::{
     KeywordMirrorSource, RecallChannels, RecallGates, RecallHit, RecallInput, RecallMemoryLayers,
-    RecallOutput, RetrieverSource,
+    RecallOptions, RecallOutput, RetrieverSource,
 };
 
 #[cfg(test)]

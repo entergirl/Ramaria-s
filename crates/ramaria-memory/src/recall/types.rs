@@ -16,6 +16,7 @@ use ramaria_core::types::PersonaKind;
 use crate::decay::DecayConfig;
 use crate::keyword::KeywordService;
 use crate::retriever::{Retriever, SearchResult};
+use crate::trace::RecallTrace;
 
 // =========================================================
 // 只读视图抽象（宿主侧句柄注入）
@@ -244,6 +245,16 @@ pub struct RecallInput<'a, R: RetrieverSource + ?Sized, K: KeywordMirrorSource +
     pub memory_layers: RecallMemoryLayers,
     /// 当前时间（Unix 毫秒，衰减与访问加成基准）。
     pub now_ms: i64,
+}
+
+/// 召回装配选项。
+///
+/// 字段约定:
+/// - `trace`: 传 `Some(&mut RecallTrace)` 时采集诊断轨迹；`None`（默认）不采集，
+///   装配过程不构造任何轨迹数据，返回值、排序与开销均不受影响。
+#[derive(Default)]
+pub struct RecallOptions<'a> {
+    pub trace: Option<&'a mut RecallTrace>,
 }
 
 /// 单个检索通道的命中计数（诊断用）。

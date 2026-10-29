@@ -75,6 +75,22 @@ pub async fn insert(pool: &SqlitePool, block: &UttBlock) -> RamariaResult<i64> {
     .storage_err("保存 utt 话语块失败")
 }
 
+/// 按 id 查询单个话语块（记忆单元溯源用）。
+///
+/// 返回:
+/// - `Ok(Some(block))`: 块存在；
+/// - `Ok(None)`: 不存在。
+pub async fn get_by_id(pool: &SqlitePool, id: i64) -> RamariaResult<Option<UttBlock>> {
+    let row = sqlx::query_as::<_, UttBlockRow>(&format!(
+        "SELECT {BLOCK_COLUMNS} FROM utt_blocks WHERE id = ?"
+    ))
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .storage_err("查询 utt 话语块失败")?;
+    row.map(|r| r.into_block()).transpose()
+}
+
 /// 按 persona 查询全部话语块（按创建时间升序）。
 ///
 /// 安全约束:

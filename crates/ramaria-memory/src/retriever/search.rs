@@ -5,6 +5,7 @@
 //! - 支持注入关键词镜像命中（KeywordService 在 app 层预取后传入）作为第四通道
 //! - 提供关键词精确检索、脉络加权检索与 BM25 子串检索等专项入口
 //! - 检索结果解析复用 helpers 中的文档/label 解析与关键词计数辅助函数
+//! - 可选轨迹采集：`search_traced` 记录四通道候选与丢弃原因，不采集时不构造轨迹数据
 //!
 //! 融合口径:
 //! - 四通道（向量 / BM25 / 图谱 / 关键词镜像）统一经 `rrf_fuse_optional` 融合；
@@ -12,10 +13,16 @@
 //! - 关键词命中以 `(label, score)` 纯数据形式注入：label 复用向量通道
 //!   `L1:{uuid}` / `L2:{id}` 格式，经既有 `parse_doc_label` 解析，无句柄泄漏。
 
+use std::collections::HashSet;
+
 use crate::bm25::DocId;
 use crate::decay::{DecayConfig, calc_retention};
 use crate::graph_retriever::graph_hits_to_rrf_pairs;
 use crate::rrf::{ChannelResult, FusedResult, OptionalChannels, rrf_fuse_optional};
+use crate::trace::{
+    ChannelCandidate, ChannelTrace, DropReason, DroppedTrace, FusedEntryTrace, RetrievalTrace,
+    TraceChannel,
+};
 use crate::vector::{VectorHit, VectorIndex};
 use ramaria_core::keyword::KeywordToken;
 
@@ -60,6 +67,45 @@ impl Retriever {
         request: &SearchRequest,
         query_vec: Option<&[f32]>,
         keyword_hits: Option<Vec<(String, f64)>>,
+    ) -> Vec<SearchResult> {
+        self.search_inner(request, query_vec, keyword_hits, None)
+    }
+
+    /// 执行多通道组合检索并采集检索阶段轨迹。
+    ///
+    /// 参数:
+    /// - `request`: 检索请求；
+    /// - `query_vec`: 可选的 query 向量（若未提供则跳过向量通道）；
+    /// - `keyword_hits`: 关键词镜像命中（label + score 列表；None/空 = 无关键词通道）。
+    ///
+    /// 返回:
+    /// - 与 `search_with_keyword_hits` 逐项一致的检索结果，以及本次检索的阶段轨迹。
+    ///
+    /// 说明:
+    /// - 轨迹只记 label、通道原始分与名次，不含查询文本与文档摘要。
+    pub fn search_traced(
+        &self,
+        request: &SearchRequest,
+        query_vec: Option<&[f32]>,
+        keyword_hits: Option<Vec<(String, f64)>>,
+    ) -> (Vec<SearchResult>, RetrievalTrace) {
+        let mut trace = RetrievalTrace::default();
+        let results = self.search_inner(request, query_vec, keyword_hits, Some(&mut trace));
+        (results, trace)
+    }
+
+    /// 多通道检索的统一实现（可含关键词镜像通道），可选写入检索阶段轨迹。
+    ///
+    /// 参数:
+    /// - `request` / `query_vec` / `keyword_hits`: 同 `search_with_keyword_hits`；
+    /// - `trace`: 传 `Some` 时按通道 / 融合 / 丢弃三个阶段写入；
+    ///   `None` 时不构造任何轨迹数据，行为与开销与无轨迹路径一致。
+    fn search_inner(
+        &self,
+        request: &SearchRequest,
+        query_vec: Option<&[f32]>,
+        keyword_hits: Option<Vec<(String, f64)>>,
+        mut trace: Option<&mut RetrievalTrace>,
     ) -> Vec<SearchResult> {
         // ---- BM25 通道 ----
         // 只取融合所需的候选量：按 request.top_k 的固定倍数超取（下限 64），
@@ -151,6 +197,16 @@ impl Retriever {
             None
         };
 
+        // ---- 轨迹：四通道候选（缺席通道也记一条，active=false、候选为空） ----
+        if let Some(t) = trace.as_deref_mut() {
+            t.channels = vec![
+                channel_trace(TraceChannel::Vector, vector_channel.as_ref()),
+                channel_trace(TraceChannel::Bm25, bm25_channel.as_ref()),
+                channel_trace(TraceChannel::Graph, graph_channel.as_ref()),
+                channel_trace(TraceChannel::Keyword, keyword_channel.as_ref()),
+            ];
+        }
+
         // ---- RRF 融合 ----
         // 通道缺席不产生惩罚项；权重按通道身份取值（修复"向量缺席时图谱按 bm25_weight 计权"）。
         // 融合阶段即按本次请求的 top_k 截断：否则 RrfConfig 的默认 top_k（5）会把
@@ -167,6 +223,63 @@ impl Retriever {
             },
             &rrf_config,
         );
+        // ---- 轨迹：融合条目与融合截断丢弃 ----
+        // 衰减因子与衰减后分由召回装配在衰减阶段回填，此处先记衰减前口径。
+        if let Some(t) = trace.as_deref_mut() {
+            t.fused = fused
+                .iter()
+                .map(|f| FusedEntryTrace {
+                    id: f.doc_id.clone(),
+                    layer: String::new(),
+                    rrf_score: f.rrf_score,
+                    decay_factor: 1.0,
+                    decayed_score: f.rrf_score,
+                    vector_raw: f.vector_raw_score,
+                    bm25_raw: f.bm25_raw_score,
+                    graph_raw: f.graph_raw_score,
+                    keyword_raw: keyword_channel.as_ref().and_then(|c| {
+                        c.results
+                            .iter()
+                            .find(|(label, _)| label == &f.doc_id)
+                            .map(|(_, score)| *score)
+                    }),
+                })
+                .collect();
+
+            // 通道候选里未出现在融合结果中的 label 记一次融合截断；
+            // 同一 label 命中多个通道时取最大原始分。
+            let fused_ids: HashSet<&str> = fused.iter().map(|f| f.doc_id.as_str()).collect();
+            let mut cut: Vec<DroppedTrace> = Vec::new();
+            for channel in [
+                &vector_channel,
+                &bm25_channel,
+                &graph_channel,
+                &keyword_channel,
+            ] {
+                let Some(result) = channel.as_ref() else {
+                    continue;
+                };
+                for (label, score) in &result.results {
+                    if fused_ids.contains(label.as_str()) {
+                        continue;
+                    }
+                    match cut.iter_mut().find(|d| &d.id == label) {
+                        Some(existing) => {
+                            if *score > existing.score {
+                                existing.score = *score;
+                            }
+                        }
+                        None => cut.push(DroppedTrace {
+                            id: label.clone(),
+                            reason: DropReason::FusionCut,
+                            score: *score,
+                        }),
+                    }
+                }
+            }
+            t.dropped = cut;
+        }
+
         if fused.is_empty() {
             return Vec::new();
         }
@@ -174,7 +287,7 @@ impl Retriever {
         // ---- 解析为 SearchResult ----
         let mut results: Vec<SearchResult> = Vec::with_capacity(fused.len());
 
-        for f in &fused {
+        for (index, f) in fused.iter().enumerate() {
             // 图谱实体 label（`graph:{entity}`）优先解析；BM25 与向量通道共用
             // `L1:{uuid}` / `L2:{id}` label 格式，解析统一由 `parse_doc_label` 承担；
             // 文档已被移除则跳过。
@@ -192,9 +305,26 @@ impl Retriever {
                             };
                             (did, puid, sh, ca, la, sum, lyr)
                         }
-                        None => continue, // 文档已被移除，跳过
+                        None => {
+                            // 文档已被移除，跳过
+                            if let Some(t) = trace.as_deref_mut() {
+                                t.dropped.push(DroppedTrace {
+                                    id: f.doc_id.clone(),
+                                    reason: DropReason::DocMissing,
+                                    score: f.rrf_score,
+                                });
+                            }
+                            continue;
+                        }
                     }
                 };
+
+            // 轨迹：分层在解析成功后才有值，解析失败的条目保持空字符串。
+            if let Some(t) = trace.as_deref_mut() {
+                if let Some(entry) = t.fused.get_mut(index) {
+                    entry.layer = layer.clone();
+                }
+            }
 
             // persona_uid 过滤
             let persona_mismatch = request
@@ -203,6 +333,13 @@ impl Retriever {
                 .zip(persona_uid.as_ref())
                 .is_some_and(|(target_uid, puid)| puid != target_uid);
             if persona_mismatch {
+                if let Some(t) = trace.as_deref_mut() {
+                    t.dropped.push(DroppedTrace {
+                        id: f.doc_id.clone(),
+                        reason: DropReason::PersonaMismatch,
+                        score: f.rrf_score,
+                    });
+                }
                 continue;
             }
 
@@ -358,6 +495,45 @@ impl Retriever {
                 sr
             })
             .collect()
+    }
+}
+
+// =========================================================
+// 轨迹辅助
+// =========================================================
+
+/// 把通道结果转为轨迹条目。
+///
+/// 参数:
+/// - `channel`: 通道标识；
+/// - `channel_result`: 该通道的检索结果（`None` = 通道关闭 / 无结果）。
+///
+/// 返回:
+/// - 通道轨迹；候选按通道原始顺序编号（`rank` 从 1 起），缺席通道 `active=false`。
+fn channel_trace(
+    channel: TraceChannel,
+    channel_result: Option<&ChannelResult<String>>,
+) -> ChannelTrace {
+    match channel_result {
+        Some(result) if !result.results.is_empty() => ChannelTrace {
+            channel,
+            active: true,
+            candidates: result
+                .results
+                .iter()
+                .enumerate()
+                .map(|(index, (id, raw_score))| ChannelCandidate {
+                    id: id.clone(),
+                    raw_score: *raw_score,
+                    rank: index + 1,
+                })
+                .collect(),
+        },
+        _ => ChannelTrace {
+            channel,
+            active: false,
+            candidates: Vec::new(),
+        },
     }
 }
 

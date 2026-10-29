@@ -1415,6 +1415,23 @@ pub trait StoreCrud: Send + Sync {
         &self,
         persona_uid: &str,
     ) -> RamariaResult<Vec<PersonalityTrait>>;
+    /// 按 id 查询单条性格标签（不按 persona 过滤、不按状态过滤）。
+    ///
+    /// 职责:
+    /// - 供证据链与记忆单元溯源按主键定位标签，避免全量列表扫描。
+    ///
+    /// 参数:
+    /// - `id`: personality_traits 表的 INTEGER 主键。
+    ///
+    /// 返回:
+    /// - `Ok(Some(trait))`: 标签存在（含非 active 状态）；
+    /// - `Ok(None)`: 不存在。
+    ///
+    /// 默认实现:
+    /// - 返回 `Ok(None)`（存量 mock 无需实现即可编译）。
+    async fn get_trait(&self, _id: i64) -> RamariaResult<Option<PersonalityTrait>> {
+        Ok(None)
+    }
     /// `id` 为 personality_traits 表的 INTEGER 主键。
     async fn update_trait_confidence(
         &self,
@@ -1462,6 +1479,20 @@ pub trait StoreCrud: Send + Sync {
     }
 
     // -- Utt Blocks (原文话语块) --
+    /// 按 id 查询单个 utt 话语块（记忆单元溯源用）。
+    ///
+    /// 参数:
+    /// - `id`: utt_blocks 表的 INTEGER 主键。
+    ///
+    /// 返回:
+    /// - `Ok(Some(block))`: 块存在；
+    /// - `Ok(None)`: 不存在。
+    ///
+    /// 默认实现:
+    /// - 返回 `Ok(None)`（存量 mock 无需实现即可编译）。
+    async fn get_utt_block(&self, _id: i64) -> RamariaResult<Option<UttBlock>> {
+        Ok(None)
+    }
     /// 插入一条 utt 话语块，返回自增 id。
     ///
     /// 默认实现返回 `Unsupported` 错误（存量 mock 无需实现即可编译）。

@@ -187,6 +187,110 @@ fn budget_zero_history_budget() {
     // alone is larger than the window — this is expected for the edge case.
 }
 
+// ---- 预算裁剪清单（dropped） ----
+
+/// 三处内容都被裁剪：清单按 system_prompt → memory_context → history 排列，
+/// history 下标升序，且与保留条数互补。
+#[test]
+fn budget_dropped_lists_all_trimmed_units_in_order() {
+    let config = TokenBudgetConfig {
+        system_prompt_reserve: 5,
+        context_window: 100,
+        max_output_tokens: 10,
+    };
+    let system_prompt = "系统提示".repeat(10);
+    let memory = "记忆".repeat(150);
+    let history: Vec<ChatMessage> = ["旧消息一", "旧消息二", "旧消息三", "旧消息四"]
+        .into_iter()
+        .map(|content| ChatMessage {
+            role: ramaria_core::types::MessageRole::User,
+            content: content.to_string(),
+        })
+        .collect();
+
+    let result = apply_token_budget(&system_prompt, Some(&memory), &history, "你好", &config);
+
+    assert_eq!(
+        result.dropped.first().map(|d| d.kind),
+        Some(BudgetDropKind::SystemPrompt)
+    );
+    assert_eq!(result.dropped[0].id, "system_prompt");
+    assert!(
+        result
+            .dropped
+            .iter()
+            .any(|d| d.kind == BudgetDropKind::MemoryContext && d.id == "rag")
+    );
+    assert!(
+        result.dropped.iter().all(|d| d.chars > 0),
+        "只登记真实被裁掉的字符"
+    );
+
+    // history 只出现在尾部，且下标升序
+    let first_history = result
+        .dropped
+        .iter()
+        .position(|d| d.kind == BudgetDropKind::History)
+        .expect("历史应被裁剪");
+    assert!(
+        result.dropped[first_history..]
+            .iter()
+            .all(|d| d.kind == BudgetDropKind::History)
+    );
+    let history_ids: Vec<usize> = result.dropped[first_history..]
+        .iter()
+        .map(|d| d.id.parse::<usize>().expect("history id 为入参下标"))
+        .collect();
+    assert!(
+        history_ids.windows(2).all(|w| w[0] < w[1]),
+        "history 下标应升序: {history_ids:?}"
+    );
+    assert_eq!(history_ids.len() + result.history.len(), history.len());
+}
+
+/// 记忆与历史预算为 0：记忆整段记一条，历史全部记入且下标升序。
+#[test]
+fn budget_dropped_records_zero_budget_units() {
+    // 固定预留（output 256 + 用户消息）已超出窗口 → 记忆与历史预算为 0
+    let config = TokenBudgetConfig::new(50, 256);
+    let memory = "记忆内容";
+    let history: Vec<ChatMessage> = ["旧一", "旧二"]
+        .into_iter()
+        .map(|content| ChatMessage {
+            role: ramaria_core::types::MessageRole::Assistant,
+            content: content.to_string(),
+        })
+        .collect();
+
+    let result = apply_token_budget("助手", Some(memory), &history, "新消息", &config);
+
+    assert!(result.memory_context.is_none());
+    assert!(result.history.is_empty());
+
+    let rag = result
+        .dropped
+        .iter()
+        .find(|d| d.kind == BudgetDropKind::MemoryContext)
+        .expect("记忆应整段丢弃");
+    assert_eq!(rag.id, "rag");
+    assert_eq!(rag.chars, memory.chars().count());
+
+    let history_ids: Vec<&str> = result
+        .dropped
+        .iter()
+        .filter(|d| d.kind == BudgetDropKind::History)
+        .map(|d| d.id.as_str())
+        .collect();
+    assert_eq!(history_ids, ["0", "1"]);
+    assert!(
+        result
+            .dropped
+            .iter()
+            .all(|d| d.kind != BudgetDropKind::SystemPrompt),
+        "短系统提示不应被裁"
+    );
+}
+
 #[test]
 fn estimate_tokens_english_text() {
     let text =

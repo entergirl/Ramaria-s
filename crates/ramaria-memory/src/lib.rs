@@ -32,6 +32,7 @@ pub mod rrf;
 mod similarity; // 内部共享工具（相似度统一实现，不暴露到公共 API）
 pub mod style;
 pub mod token_budget;
+pub mod trace;
 mod utils;
 pub mod utt;
 pub mod vector; // 内部共享工具（不暴露到公共 API）
@@ -78,7 +79,7 @@ pub use rag::{RagConfig, filter_by_persona, format_context_text};
 // 召回装配共用实现（在线管线与服务层同源）
 pub use recall::{
     KeywordMirrorSource, RecallChannels, RecallGates, RecallHit, RecallInput, RecallMemoryLayers,
-    RecallOutput, RetrieverSource, assemble_recall,
+    RecallOptions, RecallOutput, RetrieverSource, assemble_recall, assemble_recall_with,
 };
 
 // L1 Summarizer
@@ -269,8 +270,8 @@ pub use prompt::{
 
 // Token Budget 管理
 pub use token_budget::{
-    BudgetedContext, CoordinatedInjection, TokenBudgetConfig, allocate_injection_budget,
-    apply_token_budget, estimate_tokens, truncate_at_boundary,
+    BudgetDrop, BudgetDropKind, BudgetedContext, CoordinatedInjection, TokenBudgetConfig,
+    allocate_injection_budget, apply_token_budget, estimate_tokens, truncate_at_boundary,
 };
 
 // 通用解析辅助（主动对话判据复用：think 剥离与 JSON 对象提取）

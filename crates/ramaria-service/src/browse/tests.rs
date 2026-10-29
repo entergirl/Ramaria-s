@@ -12,6 +12,7 @@
 
 mod l1;
 mod session_preview;
+mod units;
 
 use crate::test_support::{
     engine_with_db, seed_channel_session, seed_messages, seed_persona, seed_session_with_messages,

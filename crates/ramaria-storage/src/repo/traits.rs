@@ -140,6 +140,25 @@ pub async fn list_traits_by_persona(
         .collect::<RamariaResult<Vec<_>>>()
 }
 
+/// 按 id 查询单条性格标签（不按 persona / status 过滤）。
+///
+/// 返回:
+/// - `Ok(Some(trait))`: 标签存在；
+/// - `Ok(None)`: 不存在。
+pub async fn get_by_id(pool: &SqlitePool, id: i64) -> RamariaResult<Option<PersonalityTrait>> {
+    let row = sqlx::query_as::<_, TraitRow>(
+        "SELECT id, persona_uid, layer, trait as trait_label, meaning, not_meaning, trigger, suppress,
+         related, seq, source, ref_event_id, ref_l1_id, confidence, evidence, consistency,
+         status, created_at, updated_at
+         FROM personality_traits WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .storage_err("查询性格标签失败")?;
+    row.map(|r| r.into_trait()).transpose()
+}
+
 pub async fn update_confidence(
     pool: &SqlitePool,
     id: i64,

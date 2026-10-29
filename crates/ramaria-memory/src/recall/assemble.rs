@@ -4,6 +4,7 @@
 //! - 单份实现：检索 → 子层过滤 → 衰减重排 → Persona-Aware 过滤 → 段落与 utt 渲染
 //! - 锁纪律：std 读锁只覆盖同步内存检索；embedding 生成与 touch_l1 在锁外 await
 //! - 静默降级：嵌入 / 镜像 / 索引任一缺席都返回结构完整的空输出
+//! - 轨迹可选：`assemble_recall_with` 按阶段写入 `RecallTrace`，默认入口不构造轨迹
 
 use std::sync::Arc;
 
@@ -16,17 +17,39 @@ use crate::keyword::CompositeIndex;
 use crate::keyword::service::{KeywordPoolSnapshot, query_text_labels};
 use crate::rag::{RagConfig, filter_by_persona, format_context_text};
 use crate::retriever::{SearchRequest, SearchResult, UttHit};
+use crate::token_budget::estimate_tokens;
+use crate::trace::{
+    BudgetTrace, ChannelCandidate, DropReason, DroppedTrace, RetrievalTrace, UttTrace,
+};
 use crate::utils::EMBED_CALL_TIMEOUT;
 
 use super::types::{
-    KeywordMirrorSource, RecallChannels, RecallHit, RecallInput, RecallOutput, RetrieverSource,
+    KeywordMirrorSource, RecallChannels, RecallHit, RecallInput, RecallOptions, RecallOutput,
+    RetrieverSource,
 };
 
 // =========================================================
 // 共用召回装配
 // =========================================================
 
-/// 执行一次完整召回装配。
+/// 执行一次完整召回装配（不采集诊断轨迹）。
+///
+/// 参数:
+/// - `input`: 召回输入（依赖句柄 + 生效配置 + 闸门 + 时间基准）。
+///
+/// 返回:
+/// - 召回输出；任何降级路径都返回结构完整的输出而非错误（调用方按空值处理）。
+///
+/// 说明:
+/// - 产品路径的默认入口：等价于 `assemble_recall_with(input, RecallOptions::default())`，
+///   装配过程不构造任何轨迹数据。
+pub async fn assemble_recall<R: RetrieverSource + ?Sized, K: KeywordMirrorSource + ?Sized>(
+    input: RecallInput<'_, R, K>,
+) -> RecallOutput {
+    assemble_recall_with(input, RecallOptions::default()).await
+}
+
+/// 执行一次完整召回装配，并按需采集诊断轨迹。
 ///
 /// 流程:
 /// 1. 闸门判定：两个通道全关 → 直接返回空输出（不生成向量、不检索）；
@@ -39,17 +62,30 @@ use super::types::{
 /// 8. utt 原文检索与预算渲染（白名单内且闸门开启）。
 ///
 /// 参数:
-/// - `input`: 召回输入（依赖句柄 + 生效配置 + 闸门 + 时间基准）。
+/// - `input`: 召回输入（依赖句柄 + 生效配置 + 闸门 + 时间基准）；
+/// - `options`: 装配选项；`trace` 为 `Some` 时按阶段写入轨迹，为 `None` 时与 `assemble_recall` 等价。
 ///
 /// 返回:
 /// - 召回输出；任何降级路径都返回结构完整的输出而非错误（调用方按空值处理）。
 ///
 /// 说明:
-/// - 本函数是在线管线与服务层 recall 的唯一召回实现，行为等价由两入口共用同一份代码保证。
-pub async fn assemble_recall<R: RetrieverSource + ?Sized, K: KeywordMirrorSource + ?Sized>(
+/// - 本函数是在线管线与服务层 recall 的唯一召回实现，行为等价由两入口共用同一份代码保证；
+/// - 轨迹写入不改变任何计算、顺序与返回值：同一输入开 / 关轨迹得到逐字段相等的输出；
+/// - 轨迹只记 label、分数与字符数，不含查询文本与记忆原文。
+pub async fn assemble_recall_with<R: RetrieverSource + ?Sized, K: KeywordMirrorSource + ?Sized>(
     input: RecallInput<'_, R, K>,
+    options: RecallOptions<'_>,
 ) -> RecallOutput {
+    let mut trace = options.trace;
     let mut output = RecallOutput::default();
+
+    // ---- 0. 轨迹：查询长度与本次生效的条数预算 ----
+    // 条数上限与是否有命中无关，先写入，避免空召回时被读成"预算为零"。
+    let rag_config = RagConfig::from_retrieval_config(input.retrieval);
+    if let Some(t) = trace.as_deref_mut() {
+        t.query_chars = input.query.chars().count();
+        t.budget.max_memories = rag_config.max_memories;
+    }
 
     // ---- 1. 闸门判定：两通道全关时直接返回（不生成向量、不检索） ----
     if !input.gates.memory_rag && !input.gates.utt {
@@ -101,6 +137,11 @@ pub async fn assemble_recall<R: RetrieverSource + ?Sized, K: KeywordMirrorSource
         }
     };
 
+    // ---- 2.1 轨迹：查询向量维度（未生成时为 None） ----
+    if let Some(t) = trace.as_deref_mut() {
+        t.query_vector_dim = query_vec.as_ref().map(Vec::len);
+    }
+
     // ---- 3. 关键词镜像通道预取（混合检索第四通道） ----
     // 镜像查询异步（语义层需 embedding），必须在检索器读锁之前完成；
     // 预取后仅把 (label, score) 纯数据交给同步 search（无句柄泄漏）。
@@ -145,23 +186,36 @@ pub async fn assemble_recall<R: RetrieverSource + ?Sized, K: KeywordMirrorSource
     let rag_active = input.gates.memory_rag;
     let keyword_for_search = keyword_hits.clone();
     let query_vec_snapshot = query_vec.clone();
+    // 轨迹以返回值形式带出：检索器回调只做同步内存读取，不把 &mut 带进闭包。
+    let trace_retrieval = trace.is_some();
 
-    let (mut results, utt_hits): (Vec<SearchResult>, Vec<UttHit>) =
-        input.retriever.with_retriever(|retriever| {
-            let Some(retriever) = retriever else {
-                tracing::debug!("检索索引未加载，本次召回为空（不视为故障）");
-                return (Vec::new(), Vec::new());
+    let (mut results, utt_hits, retrieval_trace): (
+        Vec<SearchResult>,
+        Vec<UttHit>,
+        Option<RetrievalTrace>,
+    ) = input.retriever.with_retriever(|retriever| {
+        let Some(retriever) = retriever else {
+            tracing::debug!("检索索引未加载，本次召回为空（不视为故障）");
+            return (Vec::new(), Vec::new(), None);
+        };
+
+        // 4.1 摘要路多通道检索（RAG 闸门关闭时不执行）
+        let (results, retrieval_trace) = if rag_active {
+            let request = SearchRequest {
+                query: query_owned.clone(),
+                persona_uid: persona_owned.clone(),
+                top_k: search_top_k,
+                filter_share: true,
             };
-
-            // 4.1 摘要路多通道检索（RAG 闸门关闭时不执行）
-            let results = if rag_active {
-                let request = SearchRequest {
-                    query: query_owned.clone(),
-                    persona_uid: persona_owned.clone(),
-                    top_k: search_top_k,
-                    filter_share: true,
-                };
-                match (query_vec_snapshot.as_deref(), keyword_for_search) {
+            if trace_retrieval {
+                let (results, retrieval) = retriever.search_traced(
+                    &request,
+                    query_vec_snapshot.as_deref(),
+                    keyword_for_search,
+                );
+                (results, Some(retrieval))
+            } else {
+                let results = match (query_vec_snapshot.as_deref(), keyword_for_search) {
                     (Some(qv), Some(hits)) => {
                         retriever.search_with_keyword_hits(&request, Some(qv), Some(hits))
                     }
@@ -170,28 +224,37 @@ pub async fn assemble_recall<R: RetrieverSource + ?Sized, K: KeywordMirrorSource
                         retriever.search_with_keyword_hits(&request, None, Some(hits))
                     }
                     (None, None) => retriever.search(&request, None),
-                }
-            } else {
-                Vec::new()
-            };
+                };
+                (results, None)
+            }
+        } else {
+            (Vec::new(), None)
+        };
 
-            // 4.2 utt 原文块检索（白名单内且闸门开启；严格按 persona 隔离）
-            let utt_hits = if utt_persona_allowed {
-                match persona_owned.as_deref() {
-                    Some(puid) => retriever.search_utt(
-                        &query_owned,
-                        query_vec_snapshot.as_deref(),
-                        utt_top_k,
-                        Some(puid),
-                    ),
-                    None => Vec::new(),
-                }
-            } else {
-                Vec::new()
-            };
+        // 4.2 utt 原文块检索（白名单内且闸门开启；严格按 persona 隔离）
+        let utt_hits = if utt_persona_allowed {
+            match persona_owned.as_deref() {
+                Some(puid) => retriever.search_utt(
+                    &query_owned,
+                    query_vec_snapshot.as_deref(),
+                    utt_top_k,
+                    Some(puid),
+                ),
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
 
-            (results, utt_hits)
-        });
+        (results, utt_hits, retrieval_trace)
+    });
+
+    // ---- 轨迹：检索阶段结果落地（含四通道候选、融合条目与融合截断） ----
+    if let Some(t) = trace.as_deref_mut() {
+        if let Some(retrieval) = retrieval_trace {
+            t.retrieval = retrieval;
+        }
+    }
 
     // ---- 4.3 记忆子层过滤（L1 / L2 分层开关） ----
     // 只请求单一子层时，另一层既不进段落文本也不进结构化条目（服务层 include 语义）；
@@ -199,6 +262,17 @@ pub async fn assemble_recall<R: RetrieverSource + ?Sized, K: KeywordMirrorSource
     // 两层全开（在线管线默认）时整个分支跳过，零开销、行为不变。
     if !(input.memory_layers.l1 && input.memory_layers.l2) {
         let before = results.len();
+        if let Some(t) = trace.as_deref_mut() {
+            for r in &results {
+                if !input.memory_layers.allows(&r.layer) {
+                    t.dropped.push(DroppedTrace {
+                        id: r.doc_id.to_string(),
+                        reason: DropReason::LayerFiltered,
+                        score: r.rrf_score,
+                    });
+                }
+            }
+        }
         results.retain(|r| input.memory_layers.allows(&r.layer));
         tracing::debug!(
             before,
@@ -216,6 +290,17 @@ pub async fn assemble_recall<R: RetrieverSource + ?Sized, K: KeywordMirrorSource
 
         // 收集命中的 L1 文档 id（供后续 touch 接线刷新 last_accessed_at）
         let mut touched_l1_ids: Vec<Uuid> = Vec::new();
+
+        // 轨迹：label → 融合条目下标（label 在融合结果内唯一，回填免逐条线性查找）
+        let trace_index: Option<std::collections::HashMap<String, usize>> =
+            trace.as_deref_mut().map(|t| {
+                t.retrieval
+                    .fused
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| (entry.id.clone(), index))
+                    .collect()
+            });
 
         for r in &mut results {
             let decay_config = if r.layer == "l2" {
@@ -237,6 +322,17 @@ pub async fn assemble_recall<R: RetrieverSource + ?Sized, K: KeywordMirrorSource
                 decay_config,
             );
             r.rrf_score *= decay_factor;
+
+            // 轨迹：按 label 回填衰减因子与衰减后分（未命中融合条目时不写）
+            if let Some(t) = trace.as_deref_mut() {
+                if let Some(index) = trace_index
+                    .as_ref()
+                    .and_then(|map| map.get(&r.doc_id.to_string()).copied())
+                {
+                    t.retrieval.fused[index].decay_factor = decay_factor;
+                    t.retrieval.fused[index].decayed_score = r.rrf_score;
+                }
+            }
 
             if r.layer == "l1" {
                 if let DocId::L1(id) = r.doc_id {
@@ -280,6 +376,15 @@ pub async fn assemble_recall<R: RetrieverSource + ?Sized, K: KeywordMirrorSource
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
+        // 轨迹：融合条目按同一比较器重排，使顺序与衰减排序后的结果一致（稳定排序）。
+        if let Some(t) = trace.as_deref_mut() {
+            t.retrieval.fused.sort_by(|a, b| {
+                b.decayed_score
+                    .partial_cmp(&a.decayed_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+
         // ---- 5.2 通道命中计数（诊断；基于融合后结果） ----
         output.channels = RecallChannels {
             vector: results.iter().filter(|r| r.vector_score.is_some()).count(),
@@ -292,9 +397,41 @@ pub async fn assemble_recall<R: RetrieverSource + ?Sized, K: KeywordMirrorSource
         // ---- 5.3 Persona-Aware 过滤 + 段落渲染 ----
         // 阈值按显式载体 `persona_kind` 选取；未知类型（None）保守按最严（char 阈值）。
         let persona_kind = input.persona_kind.unwrap_or(PersonaKind::Char);
-        let rag_config = RagConfig::from_retrieval_config(input.retrieval);
         let filtered = filter_by_persona(&results, persona_kind, &rag_config);
         output.filtered_count = filtered.len();
+
+        // 轨迹：人格阈值过滤与条数预算（候选集 = 过滤后、渲染前）
+        if let Some(t) = trace.as_deref_mut() {
+            for r in &results {
+                if !filtered.iter().any(|kept| kept.doc_id == r.doc_id) {
+                    t.dropped.push(DroppedTrace {
+                        id: r.doc_id.to_string(),
+                        reason: DropReason::PersonaShare,
+                        score: r.rrf_score,
+                    });
+                }
+            }
+
+            let candidates = filtered.len();
+            let max_memories = rag_config.max_memories;
+            t.budget = BudgetTrace {
+                max_memories,
+                candidates,
+                kept: candidates.min(max_memories),
+                tokens_before: filtered
+                    .iter()
+                    .map(|r| estimate_tokens(&r.doc_summary))
+                    .sum(),
+                tokens_after: 0,
+            };
+            for r in filtered.iter().skip(max_memories) {
+                t.dropped.push(DroppedTrace {
+                    id: r.doc_id.to_string(),
+                    reason: DropReason::MaxMemories,
+                    score: r.rrf_score,
+                });
+            }
+        }
 
         if filtered.is_empty() {
             tracing::debug!("Persona-Aware 过滤后无结果");
@@ -339,11 +476,32 @@ pub async fn assemble_recall<R: RetrieverSource + ?Sized, K: KeywordMirrorSource
     }
 
     // ---- 6. utt 原文片段渲染（预算裁剪在渲染内完成，不做块内截断） ----
+    // 轨迹：生效状态与命中候选先落地，渲染字符数在渲染后回填。
+    if let Some(t) = trace.as_deref_mut() {
+        t.utt = UttTrace {
+            active: utt_persona_allowed,
+            candidates: utt_hits
+                .iter()
+                .enumerate()
+                .map(|(index, hit)| ChannelCandidate {
+                    id: format!("L0:{}", hit.doc.id),
+                    raw_score: hit.score,
+                    rank: index + 1,
+                })
+                .collect(),
+            rendered_chars: 0,
+            budget_chars: input.utt.max_block_chars as usize,
+        };
+    }
+
     if !utt_hits.is_empty() {
         let rendered = crate::prompt::builder::render_utt_context(
             &utt_hits,
             input.utt.max_block_chars as usize,
         );
+        if let Some(t) = trace.as_deref_mut() {
+            t.utt.rendered_chars = rendered.chars().count();
+        }
         if !rendered.is_empty() {
             tracing::debug!(
                 persona_uid = input.persona_uid.unwrap_or("none"),
@@ -361,6 +519,15 @@ pub async fn assemble_recall<R: RetrieverSource + ?Sized, K: KeywordMirrorSource
             persona_uid = input.persona_uid.unwrap_or("none"),
             "utt 通道未生效（闸门关闭或 persona 不在白名单），跳过原文注入"
         );
+    }
+
+    // ---- 7. 轨迹：最终上下文文本的估算 token（上下文为 None 时记 0） ----
+    if let Some(t) = trace {
+        t.budget.tokens_after = output
+            .memory_context
+            .as_deref()
+            .map(estimate_tokens)
+            .unwrap_or(0);
     }
 
     output

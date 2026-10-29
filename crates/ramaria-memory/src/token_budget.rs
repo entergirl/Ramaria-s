@@ -138,6 +138,34 @@ impl TokenBudgetConfig {
 // 预算分配主函数
 // =========================================================
 
+/// 预算裁剪单元类型。
+///
+/// 职责:
+/// - 标出被裁掉的是哪一处内容（三处可裁剪内容各一个取值），供调用方归类诊断。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetDropKind {
+    /// System Prompt 被截断
+    SystemPrompt,
+    /// 记忆上下文被整段丢弃或截断
+    MemoryContext,
+    /// 对话历史消息被丢弃
+    History,
+}
+
+/// 被预算裁掉的单元。
+///
+/// 字段约定:
+/// - `kind`: 单元类型；
+/// - `id`: 单元标识——system_prompt 固定 `system_prompt`、记忆上下文固定 `rag`、
+///   历史消息为入参数组下标；
+/// - `chars`: 被裁掉的字符数（历史消息为整条字符数）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BudgetDrop {
+    pub kind: BudgetDropKind,
+    pub id: String,
+    pub chars: usize,
+}
+
 /// token 预算分配结果。
 ///
 /// 职责:
@@ -152,6 +180,9 @@ pub struct BudgetedContext {
     pub history: Vec<ChatMessage>,
     /// 估算的总 token 使用量
     pub estimated_tokens: usize,
+    /// 因预算被裁掉的单元，按 system_prompt → memory_context → history 的处理顺序；
+    /// history 按入参数组下标升序。未触发裁剪时为空。
+    pub dropped: Vec<BudgetDrop>,
 }
 
 /// 应用 token 预算到对话上下文。
@@ -186,20 +217,55 @@ pub fn apply_token_budget(
     // Step 2: 输出预留
     let output_reserve = config.max_output_tokens as usize;
 
+    // 裁剪清单：按 system_prompt → memory_context → history 的顺序登记
+    let mut dropped: Vec<BudgetDrop> = Vec::new();
+
     // Step 3: System Prompt（限制在 system_prompt_reserve 内）
     let (system_prompt_trimmed, system_tokens) =
         trim_system_prompt(system_prompt, config.system_prompt_reserve);
+    let system_dropped_chars = system_prompt
+        .chars()
+        .count()
+        .saturating_sub(system_prompt_trimmed.chars().count());
+    if system_dropped_chars > 0 {
+        dropped.push(BudgetDrop {
+            kind: BudgetDropKind::SystemPrompt,
+            id: "system_prompt".to_string(),
+            chars: system_dropped_chars,
+        });
+    }
 
     // Step 4: 计算剩余预算（给记忆和历史的）
     let used_by_fixed = system_tokens + user_tokens + output_reserve;
     let flexible_budget = total_budget.saturating_sub(used_by_fixed);
 
     // Step 5: 分配记忆上下文（优先）
+    let memory_source_chars = memory_context.map(|text| text.chars().count()).unwrap_or(0);
     let (memory_trimmed, memory_tokens) = trim_memory_context(memory_context, flexible_budget);
+    let memory_kept_chars = memory_trimmed
+        .as_deref()
+        .map(|text| text.chars().count())
+        .unwrap_or(0);
+    if memory_source_chars > 0 && memory_kept_chars < memory_source_chars {
+        dropped.push(BudgetDrop {
+            kind: BudgetDropKind::MemoryContext,
+            id: "rag".to_string(),
+            chars: memory_source_chars - memory_kept_chars,
+        });
+    }
 
     // Step 6: 分配对话历史（剩余预算给历史）
     let history_budget = flexible_budget.saturating_sub(memory_tokens);
-    let history_trimmed = trim_history(history, history_budget);
+    let (history_trimmed, history_dropped) = trim_history(history, history_budget);
+    for index in history_dropped {
+        if let Some(msg) = history.get(index) {
+            dropped.push(BudgetDrop {
+                kind: BudgetDropKind::History,
+                id: index.to_string(),
+                chars: msg.content.chars().count(),
+            });
+        }
+    }
 
     let estimated_tokens =
         used_by_fixed + memory_tokens + estimate_history_tokens(&history_trimmed);
@@ -209,6 +275,7 @@ pub fn apply_token_budget(
         memory_context: memory_trimmed,
         history: history_trimmed,
         estimated_tokens,
+        dropped,
     }
 }
 
@@ -253,35 +320,47 @@ fn trim_memory_context(memory_context: Option<&str>, max_tokens: usize) -> (Opti
 }
 
 /// 裁剪对话历史到预算内（从最新到最旧保留）。
-fn trim_history(history: &[ChatMessage], max_tokens: usize) -> Vec<ChatMessage> {
-    if history.is_empty() || max_tokens == 0 {
-        return Vec::new();
+///
+/// 参数:
+/// - `history`: 对话历史（按时间升序）；
+/// - `max_tokens`: 历史可用 token 预算。
+///
+/// 返回:
+/// - 保留的消息（按原顺序）与未保留消息在入参数组中的下标（升序）。
+///
+/// 说明:
+/// - 自最新向最旧累计，遇到首条放不下的消息即停止（不做块内部分保留），
+///   该条及其更旧的全部计入未保留。
+fn trim_history(history: &[ChatMessage], max_tokens: usize) -> (Vec<ChatMessage>, Vec<usize>) {
+    if history.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    if max_tokens == 0 {
+        return (Vec::new(), (0..history.len()).collect());
     }
 
     let mut remaining = max_tokens;
-    let mut kept: Vec<&ChatMessage> = Vec::new();
+    let mut kept: Vec<(usize, &ChatMessage)> = Vec::new();
 
     // 从最新到最旧遍历
-    for msg in history.iter().rev() {
+    for (index, msg) in history.iter().enumerate().rev() {
         let msg_tokens = estimate_tokens(&msg.content);
         if msg_tokens <= remaining {
-            kept.push(msg);
+            kept.push((index, msg));
             remaining = remaining.saturating_sub(msg_tokens);
         } else {
-            // 最后一条（最旧的）部分保留
-            let max_chars = (msg.content.chars().count() as f64 * remaining as f64
-                / msg_tokens as f64) as usize;
-            if max_chars > 0 {
-                // 不能直接写入 ChatMessage（它不可变），跳过部分保留
-                // 此处简单放弃这条消息以保持代码简洁
-            }
             break;
         }
     }
 
+    // 未保留 = 保留区间之前的全部下标（kept 按从新到旧收集，最旧一条的下标即分界）
+    let kept_from = kept.last().map_or(history.len(), |(index, _)| *index);
+    let dropped: Vec<usize> = (0..kept_from).collect();
+
     // 恢复为从旧到新排列
     kept.reverse();
-    kept.into_iter().cloned().collect()
+    let kept = kept.into_iter().map(|(_, msg)| msg.clone()).collect();
+    (kept, dropped)
 }
 
 /// 估算历史消息列表的总 token 数。

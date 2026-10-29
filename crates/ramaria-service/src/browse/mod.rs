@@ -19,6 +19,7 @@
 //! - `session`：会话浏览（列表聚合 / 消息分页 / 详情 / 计数）；
 //! - `unread`：会话未读标记与汇总（标记已读 / 全局未读总数）；
 //! - `channel`：通道会话概览（活跃数与最近活动时间）；
+//! - `units`：记忆单元证据导出（单元 → 覆盖的消息 id 集合，供评测核对召回覆盖）；
 //! - `view`：跨域共享的浏览口径常量、输入归一与视图组装。
 
 mod channel;
@@ -28,6 +29,7 @@ mod l1;
 mod l2_l3;
 mod profile;
 mod session;
+mod units;
 mod unread;
 mod view;
 
@@ -39,6 +41,7 @@ pub(crate) use l1::{l1, l1_by_session};
 pub(crate) use l2_l3::{l2, l3};
 pub(crate) use profile::{personality_profile, profile_status};
 pub(crate) use session::{count_session_messages, session_detail, session_messages, sessions};
+pub(crate) use units::memory_unit_sources;
 pub(crate) use unread::{mark_session_read, unread_total};
 
 #[cfg(test)]

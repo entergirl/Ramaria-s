@@ -84,6 +84,22 @@ impl Engine {
         crate::browse::trait_evidence(self, req).await
     }
 
+    /// 记忆单元证据导出用例：单元 → 覆盖的消息 id 集合（评测侧核对召回证据覆盖）。
+    ///
+    /// 参数:
+    /// - `layer`: 单元层级（`l1` / `l2` / `l3` / `utt`）。
+    /// - `id`: 单元主键；`l1` 为 UUID 字符串，其余为十进制整数。
+    ///
+    /// 返回:
+    /// - 该单元覆盖的消息 id 列表（按来源顺序去重）；单元不存在或无可用区间返回空列表。
+    ///
+    /// 说明:
+    /// - L1 直读摘要区间，L2 经 `event_sources`，L3 经 `ref_*` 与 `trait_evidence`，
+    ///   utt 直读块区间；层名或 id 形态不符返回业务校验错误。
+    pub async fn memory_unit_sources(&self, layer: &str, id: &str) -> RamariaResult<Vec<String>> {
+        crate::browse::memory_unit_sources(self, layer, id).await
+    }
+
     /// 知识事实浏览用例：活跃事实，可选按字段过滤后分页。
     ///
     /// 返回:

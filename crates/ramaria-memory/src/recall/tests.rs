@@ -7,6 +7,7 @@
 use super::*;
 use crate::keyword::service::KeywordService;
 use crate::retriever::{L1DocView, L2DocView, Retriever, UttDocView};
+use crate::trace::{DropReason, RecallTrace, TraceChannel};
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::traits::StorageBackend;
 use ramaria_core::types::PersonaKind;
@@ -597,6 +598,165 @@ async fn both_handles_produce_identical_output() {
             .collect()
     };
     assert_eq!(texts(&out_plain), texts(&out_slot));
+}
+
+// =========================================================
+// 召回轨迹
+// =========================================================
+
+/// 构造两篇摘要都命中「工作压力」的 L1 文档：用于条数预算与轨迹内容断言。
+fn seeded_retriever_two_hits(persona_uid: &str) -> RwLock<Retriever> {
+    let mut retriever = Retriever::new();
+    for (offset, summary) in ["用户最近工作压力很大", "用户最近工作压力也来自加班"]
+        .into_iter()
+        .enumerate()
+    {
+        let at = 1_000 + offset as i64;
+        retriever.index_l1(&L1DocView {
+            id: Uuid::new_v4(),
+            summary: summary.to_string(),
+            keywords: Some("工作压力,加班".to_string()),
+            persona_uid: Some(persona_uid.to_string()),
+            created_at: at,
+            occurred_at: at,
+            salience: 0.8,
+            last_accessed_at: None,
+        });
+    }
+    RwLock::new(retriever)
+}
+
+/// 开 / 关轨迹：同一检索器与时间基准下，召回输出逐字段相等（只多出轨迹）。
+#[tokio::test]
+async fn trace_keeps_output_identical() {
+    let cfg = config();
+    let storage = test_storage("trace-same").await;
+    let retriever = seeded_retriever("用户最近工作压力很大", "persona-0001");
+    let mirror = RwLock::new(KeywordService::new());
+
+    let plain = assemble_recall(RecallInput {
+        retriever: &retriever,
+        keyword_mirror: &mirror,
+        storage: storage.as_ref(),
+        embedding: None,
+        query: "工作压力",
+        persona_uid: Some("persona-0001"),
+        persona_kind: Some(PersonaKind::Char),
+        retrieval: &cfg.retrieval,
+        decay: &cfg.decay,
+        utt: &cfg.utt,
+        gates: RecallGates {
+            memory_rag: true,
+            utt: false,
+        },
+        memory_layers: RecallMemoryLayers::default(),
+        now_ms: 2_000,
+    })
+    .await;
+
+    let mut trace = RecallTrace::default();
+    let traced = assemble_recall_with(
+        RecallInput {
+            retriever: &retriever,
+            keyword_mirror: &mirror,
+            storage: storage.as_ref(),
+            embedding: None,
+            query: "工作压力",
+            persona_uid: Some("persona-0001"),
+            persona_kind: Some(PersonaKind::Char),
+            retrieval: &cfg.retrieval,
+            decay: &cfg.decay,
+            utt: &cfg.utt,
+            gates: RecallGates {
+                memory_rag: true,
+                utt: false,
+            },
+            memory_layers: RecallMemoryLayers::default(),
+            now_ms: 2_000,
+        },
+        RecallOptions {
+            trace: Some(&mut trace),
+        },
+    )
+    .await;
+
+    assert_eq!(traced.memory_context, plain.memory_context);
+    assert_eq!(traced.doc_labels, plain.doc_labels);
+    assert_eq!(traced.utt_context, plain.utt_context);
+    assert_eq!(traced.hits, plain.hits);
+    assert_eq!(traced.channels, plain.channels);
+    assert_eq!(traced.fused_count, plain.fused_count);
+    assert_eq!(traced.filtered_count, plain.filtered_count);
+
+    assert_eq!(trace.query_chars, 4, "只记查询字符数，不记文本");
+    assert!(!trace.retrieval.fused.is_empty(), "轨迹应含融合条目");
+    assert!(!trace.utt.active, "utt 闸门关闭时通道未生效");
+}
+
+/// 轨迹内容：通道候选、衰减回填、条数预算丢弃与预算计数。
+#[tokio::test]
+async fn trace_records_channels_decay_and_budget() {
+    let mut cfg = config();
+    cfg.retrieval.rag_max_memories = 1;
+    let storage = test_storage("trace-content").await;
+    let retriever = seeded_retriever_two_hits("persona-0001");
+    let mirror = RwLock::new(KeywordService::new());
+
+    let mut trace = RecallTrace::default();
+    let output = assemble_recall_with(
+        RecallInput {
+            retriever: &retriever,
+            keyword_mirror: &mirror,
+            storage: storage.as_ref(),
+            embedding: None,
+            query: "工作压力",
+            persona_uid: Some("persona-0001"),
+            persona_kind: Some(PersonaKind::Char),
+            retrieval: &cfg.retrieval,
+            decay: &cfg.decay,
+            utt: &cfg.utt,
+            gates: RecallGates {
+                memory_rag: true,
+                utt: false,
+            },
+            memory_layers: RecallMemoryLayers::default(),
+            now_ms: 2_000,
+        },
+        RecallOptions {
+            trace: Some(&mut trace),
+        },
+    )
+    .await;
+
+    assert_eq!(output.fused_count, 2, "两篇摘要都应进入融合");
+    let bm25 = trace
+        .retrieval
+        .channels
+        .iter()
+        .find(|c| c.channel == TraceChannel::Bm25)
+        .expect("应有 BM25 通道轨迹");
+    assert!(bm25.active, "BM25 通道应参与融合");
+    assert_eq!(bm25.candidates.len(), 2);
+    assert_eq!(bm25.candidates[0].rank, 1, "名次从 1 起");
+
+    assert_eq!(trace.retrieval.fused.len(), 2);
+    for entry in &trace.retrieval.fused {
+        assert_eq!(entry.layer, "l1");
+        assert!(
+            entry.decayed_score <= entry.rrf_score,
+            "衰减不应提高分数: {entry:?}"
+        );
+    }
+
+    assert!(
+        trace
+            .dropped
+            .iter()
+            .any(|d| d.reason == DropReason::MaxMemories),
+        "超出条数预算的条目应记入丢弃清单"
+    );
+    assert_eq!(trace.budget.candidates, 2);
+    assert_eq!(trace.budget.kept, 1);
 }
 
 /// 通道命中计数映射：四个通道都出现在 `as_map` 输出中（含 0 值）。
