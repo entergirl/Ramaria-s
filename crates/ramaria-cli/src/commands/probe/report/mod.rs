@@ -14,8 +14,8 @@ mod aux_metrics;
 mod calibration;
 mod knowledge_quality;
 mod markdown;
+mod pairing;
 mod render;
-mod stats;
 mod style_metrics;
 mod tost;
 
@@ -45,12 +45,6 @@ pub(crate) use markdown::render_report_markdown;
 #[cfg(test)]
 pub(crate) use render::build_limitations;
 #[cfg(test)]
-pub(crate) use stats::{
-    bh_fdr_adjust, cohens_d_paired, cohens_d_pooled, erf_approx, normal_cdf, wilcoxon_signed_rank_p,
-};
-#[cfg(test)]
 pub(crate) use style_metrics::{
     EMOTION_DESCRIPTIVE_NOTE, VariantStyleMetrics, compute_style_metrics,
 };
-#[cfg(test)]
-pub(crate) use tost::{student_t_cdf, tost_equivalence};

@@ -10,13 +10,13 @@ use super::super::evaluate::VariantEvaluation;
 use super::super::run::metric_stat;
 use super::super::types::ProbeExperiment;
 use super::aux_metrics::variant_aux_metrics;
+use super::pairing::{collect_variant_dim_scores, pair_dimension_diffs};
 use super::render::{AblationComparisonRow, AblationReport};
-use super::stats::{
-    bh_fdr_adjust, cohens_d_paired, cohens_d_pooled, collect_variant_dim_scores,
-    pair_dimension_diffs, wilcoxon_signed_rank_p,
-};
 use super::style_metrics::EMOTION_DESCRIPTIVE_NOTE;
-use super::tost::{equivalence_annotation, tost_equivalence};
+use super::tost::equivalence_annotation;
+use ramaria_eval::stats::{
+    bh_fdr_adjust, cohens_d_paired, cohens_d_pooled, tost_equivalence, wilcoxon_signed_rank_p,
+};
 
 /// 构建消融对比报告。
 ///

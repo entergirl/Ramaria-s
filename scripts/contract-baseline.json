@@ -108,6 +108,7 @@
     "Keyword",
     "Diagnostics",
     "Status",
+    "Eval",
     "Probe",
     "Mcp"
   ],

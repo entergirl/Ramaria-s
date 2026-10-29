@@ -132,6 +132,8 @@ pub use persona::{PersonaLoadMode, PersonaRegenerateOutcome};
 pub use privacy::PrivacyStatus;
 pub use proactive::{ProactiveMessage, ProactivePersonaView, ProactiveSink, ProactiveStatsReport};
 pub use ramaria_memory::preset::{PresetPreview, PreviewMode};
+// Token 估算 re-export：评测层按产品口径计量注入 token，不复制实现、不直连 memory
+pub use ramaria_memory::token_budget::estimate_tokens;
 pub use recall::RecallPolicy;
 pub use seal::{SealHook, SealHooks};
 pub use settings::mask_api_key;

@@ -10,12 +10,55 @@ use std::sync::Arc;
 
 use ramaria_cli::commands;
 use ramaria_core::error::RamariaError;
+use ramaria_eval::EvalCommand;
 use ramaria_service::Engine;
 
 use crate::cli::{
-    BlocksCmd, ChannelCmd, Cli, Commands, ConfigCmd, FactCmd, ImportCmd, IndexCmd, KeywordAliasCmd,
-    KeywordCmd, PersonaCmd, ProbeArgs, RuleCmd, SessionCmd, StickerCmd, StyleCmd,
+    BlocksCmd, ChannelCmd, Cli, Commands, ConfigCmd, CorpusCmd, EvalArgs, EvalCmd, FactCmd,
+    ImportCmd, IndexCmd, KeywordAliasCmd, KeywordCmd, PersonaCmd, ProbeArgs, RuleCmd, SessionCmd,
+    StickerCmd, StyleCmd,
 };
+
+/// 评测参数 → 评测层命令（纯映射，不触碰引擎与文件系统）。
+///
+/// 参数:
+/// - `args`: clap 解析出的评测参数组。
+///
+/// 返回:
+/// - `None`: 未给子命令（进入沙盒界面）；
+/// - `Some`: 对应评测命令，语义校验留给评测层。
+pub(crate) fn eval_command(args: &EvalArgs) -> Option<EvalCommand> {
+    let command = args.command.as_ref()?;
+    let mapped = match command {
+        EvalCmd::Run {
+            corpus,
+            matrix,
+            output,
+        } => EvalCommand::Run {
+            corpus: corpus.clone(),
+            matrix: matrix.clone(),
+            output: output.clone(),
+        },
+        EvalCmd::Corpus(CorpusCmd::Fetch { name }) => {
+            EvalCommand::CorpusFetch { name: name.clone() }
+        }
+        EvalCmd::Corpus(CorpusCmd::Verify { name }) => {
+            EvalCommand::CorpusVerify { name: name.clone() }
+        }
+        EvalCmd::Baseline { corpus, output } => EvalCommand::Baseline {
+            corpus: corpus.clone(),
+            output: output.clone(),
+        },
+        EvalCmd::Score { run_id } => EvalCommand::Score {
+            run_id: run_id.clone(),
+        },
+        EvalCmd::Report { run_id, output } => EvalCommand::Report {
+            run_id: run_id.clone(),
+            output: output.clone(),
+        },
+    };
+    Some(mapped)
+}
 
 // =========================================================
 // 命令调度
@@ -449,6 +492,12 @@ pub(crate) async fn dispatch(engine: &Arc<Engine>, cli: Cli) -> anyhow::Result<(
             };
             // 探针命令经服务层引擎执行（部分算法原语由探针模块直接调用）
             commands::probe::run(engine, cmd, cli.yes).await?;
+        }
+        // eval 在引擎初始化前分流（见 main：评测不建用户库与配置）；此处仅保证穷尽
+        Commands::Eval(_) => {
+            return Err(anyhow::anyhow!(RamariaError::unsupported(
+                "eval 命令应在引擎初始化前分流（内部错误）"
+            )));
         }
         // mcp 在引擎初始化前分流（见 main：直接走服务层引擎）；此处仅保证穷尽
         Commands::Mcp(_) => {

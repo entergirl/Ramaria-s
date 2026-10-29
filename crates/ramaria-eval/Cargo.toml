@@ -1,0 +1,25 @@
+[package]
+name = "ramaria-eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+ramaria-core = { path = "../ramaria-core" }
+ramaria-service = { path = "../ramaria-service" }
+toml.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }

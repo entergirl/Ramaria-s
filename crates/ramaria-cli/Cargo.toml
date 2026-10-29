@@ -24,6 +24,7 @@ ramaria-memory = { path = "../ramaria-memory" }
 ramaria-service = { path = "../ramaria-service", features = ["importer"] }
 ramaria-storage = { path = "../ramaria-storage" }
 ramaria-importer = { path = "../ramaria-importer" }
+ramaria-eval = { path = "../ramaria-eval" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

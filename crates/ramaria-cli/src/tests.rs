@@ -1,7 +1,7 @@
 //! crates/ramaria-cli/src/tests.rs - CLI 参数解析与入口装配单元测试
 //!
 //! 设计特点:
-//! - 覆盖 clap 参数解析（--db 优先级 / probe 档位 / rule clusters / 帮助分组）
+//! - 覆盖 clap 参数解析（--db 优先级 / eval 与 probe 子命令 / rule clusters / 帮助分组）
 //! - 覆盖 `init_app` 装配路径（临时 SQLite 库，config.toml 读取与后端对齐）
 //! - 覆盖退出码契约与入口统一错误文案的映射
 //! - 经 `use super::*` 复用入口模块的私有项与装配函数
@@ -10,7 +10,9 @@ use super::*;
 use clap::Parser;
 use ramaria_core::traits::StoreInfrastructure;
 
-use crate::cli::{Cli, Commands, ImportCmd, McpCmd, ProbeArgs, RuleCmd, StyleCmd};
+use crate::cli::{
+    Cli, Commands, CorpusCmd, EvalArgs, EvalCmd, ImportCmd, McpCmd, ProbeArgs, RuleCmd, StyleCmd,
+};
 
 /// 串行化 env 变量测试（多个 #[test] 并行时会互相干扰环境变量）。
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -156,6 +158,54 @@ fn probe_baseline_window_hours_parses() {
             assert_eq!(window_hours, 24, "回应窗口缺省 24 小时");
         }
         _ => panic!("应解析为 Probe::Baseline"),
+    }
+}
+
+/// `ramaria eval` 无参进入沙盒分支，各子命令可解析并映射到对应变体。
+#[test]
+fn eval_subcommands_parse() {
+    let cli = Cli::try_parse_from(["ramaria", "eval"]).expect("无参 eval 应可解析");
+    match cli.command {
+        Commands::Eval(EvalArgs { command }) => {
+            assert!(command.is_none(), "无参 eval 不应有子命令")
+        }
+        _ => panic!("应解析为 Eval，实际解析为其他命令"),
+    }
+
+    let cli = Cli::try_parse_from(["ramaria", "eval", "run", "--corpus", "lifebench"])
+        .expect("eval run 应可解析");
+    match cli.command {
+        Commands::Eval(EvalArgs {
+            command:
+                Some(EvalCmd::Run {
+                    corpus,
+                    matrix,
+                    output,
+                }),
+        }) => {
+            assert_eq!(corpus.as_deref(), Some("lifebench"));
+            assert!(matrix.is_none(), "未给 --matrix 时保持缺省");
+            assert!(output.is_none(), "未给 --output 时保持缺省");
+        }
+        _ => panic!("应解析为 Eval::Run，实际解析为其他命令"),
+    }
+
+    let cli = Cli::try_parse_from(["ramaria", "eval", "corpus", "fetch", "lifebench"])
+        .expect("eval corpus fetch 应可解析");
+    match cli.command {
+        Commands::Eval(EvalArgs {
+            command: Some(EvalCmd::Corpus(CorpusCmd::Fetch { name })),
+        }) => assert_eq!(name, "lifebench"),
+        _ => panic!("应解析为 Eval::Corpus::Fetch，实际解析为其他命令"),
+    }
+
+    let cli =
+        Cli::try_parse_from(["ramaria", "eval", "score", "run-1"]).expect("eval score 应可解析");
+    match cli.command {
+        Commands::Eval(EvalArgs {
+            command: Some(EvalCmd::Score { run_id }),
+        }) => assert_eq!(run_id, "run-1"),
+        _ => panic!("应解析为 Eval::Score，实际解析为其他命令"),
     }
 }
 

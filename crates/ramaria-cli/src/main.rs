@@ -7,6 +7,7 @@
 //! - exit code 约定：0 成功 / 2 参数错(clap) / 3 LLM 或后端不可用 / 4 业务校验失败
 //! - 错误文案经服务层统一映射：业务类原文直出，技术类 `{场景}: {类别标题}: {原因}`
 //! - `ramaria help` 按 对话/记忆/数据/管理/高级 分组（subcommand_help_heading）
+//! - `eval` / `mcp` 在引擎初始化前分流：评测不建用户库，stdio 协议期间 stdout 保持纯净
 
 // 命令模块通过 lib.rs 暴露（pub mod），以供集成测试使用
 use ramaria_cli::commands;
@@ -57,6 +58,16 @@ async fn main() {
             )));
             exit_with_error(&err, true);
         }
+    }
+
+    // 评测命令：不经引擎初始化（评测只写评测根下的库与产物，不创建用户库与配置）。
+    // 无参进入沙盒界面的分支由评测层决定表现形式；子命令在接入前返回 unsupported。
+    if let Commands::Eval(args) = &cli.command {
+        match ramaria_eval::run(dispatch::eval_command(args)) {
+            Ok(()) => {}
+            Err(e) => exit_with_error(&anyhow::Error::from(e), json_mode),
+        }
+        return;
     }
 
     // MCP 服务端：走与传输无关的服务层（不构造应用层实例，避免重复连接池与宿主侧副作用）。
@@ -110,6 +121,7 @@ fn help_groups() -> Vec<(&'static str, &'static str)> {
         ("sticker", "管理"),
         ("diagnostics", "管理"),
         ("status", "高级"),
+        ("eval", "高级"),
         ("probe", "高级"),
         ("mcp", "高级"),
     ]
