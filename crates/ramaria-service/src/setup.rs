@@ -3,10 +3,10 @@
 //! 设计特点:
 //! - 一次调用完成首次配置：密钥入 keychain → 后端配置落库 → provider 热替换 → 健康探测 →
 //!   状态机推进，调用方（桌面向导 / CLI 向导）无需自行装配 provider
-//! - 幂等：重跑向导不丢已保存的嵌入模型路径（向量通道配置与 LLM 后端配置分属两件事）；
-//!   重复提交同一后端配置只产生一次等效结果
+//! - 幂等：重跑向导不丢已保存的嵌入模型标识与路径（向量通道配置与 LLM 后端配置分属
+//!   两件事）；重复提交同一后端配置只产生一次等效结果
 //! - 降级不阻塞：健康探测失败只把状态置为 `Degraded`（BM25 + 关键词镜像仍可用），
-//!   不返回错误，用户可修正配置后重试
+//!   不返回错误，用户可修正配置后重试；请求可显式跳过探测（脚本 / 评测前置）
 //! - 诊断可读：缺项清单（`SetupStatus::missing_items`）覆盖后端配置 / 模型选择 / 嵌入
 //!   三项，设置页直接展示
 //! - 状态口径单一：`NeedsSetup → Ready / Degraded` 的判定集中在 `determine_state`，
@@ -169,19 +169,29 @@ pub(crate) fn determine_state(status: &SetupStatus) -> AppState {
 ///
 /// 参数:
 /// - `engine`: 服务层引擎。
-/// - `req`: 向导提交的后端选择（provider / model / base_url / api_key）。
+/// - `req`: 向导提交的后端选择（provider / model / base_url / api_key）与
+///   嵌入模型路径覆盖、跳过探测开关。
 ///
 /// 返回:
 /// - 探测通过时返回按缺项诊断判定的状态：嵌入可用为 `Ready`，嵌入不可用为 `Degraded`；
 /// - 探测全部失败时返回 `Degraded`（不报错，用户可修正配置后重试）；
+/// - `skip_validate` 为 true 时不做探测，返回按配置完整性判定的状态；
 /// - 线上 provider 缺少 API key 返回 `Validation`（先于任何写入返回）。
 ///
 /// 说明:
-/// - 已保存的嵌入模型路径在本次配置中保留（重跑向导不丢向量通道配置）；
+/// - 已保存的嵌入模型标识与路径在本次配置中保留（重跑向导不丢向量通道配置），
+///   请求给出的路径优先；
+/// - 跳过探测只影响状态判定，配置写入与完成标记照常执行；
 /// - 索引构建与嵌入模型加载不在本用例内触发，由索引用例与模型用例负责。
 pub(crate) async fn run(engine: &Engine, req: &SetupRequest) -> RamariaResult<AppState> {
     apply(engine, req).await?;
     mark_completed(engine).await?;
+
+    // ---- 按请求跳过健康探测（后端可能稍后才就绪，状态按配置完整性判定） ----
+    if req.skip_validate {
+        tracing::info!("按请求跳过 LLM 健康探测，状态按配置完整性判定");
+        return refresh(engine).await;
+    }
 
     // ---- 健康探测（失败只降级，不阻塞后续操作） ----
     let llm = engine.llm_ref();
@@ -197,12 +207,18 @@ pub(crate) async fn run(engine: &Engine, req: &SetupRequest) -> RamariaResult<Ap
 
 /// 写入配置并热替换 provider（不含健康探测）。
 ///
+/// 参数:
+/// - `engine`: 服务层引擎。
+/// - `req`: 后端选择；`embedding_model_path` 非空时覆盖已保存的嵌入模型路径。
+///
 /// 返回:
 /// - 本次生效的后端配置（调用方可用于展示或后续处理）。
 ///
 /// 说明:
 /// - 与 [`run`] 拆分是为了让"配置写入"与"健康探测"可分别验证：探测依赖真实后端，
 ///   配置写入不依赖；
+/// - 嵌入配置与 LLM 后端配置分属两件事：已保存的 `embedding_model_id` 与
+///   `embedding_model_path` 均保留，仅在被请求显式覆盖时改写路径；
 /// - 线上 provider 缺少 API key 时返回 `Validation`，且不产生任何写入。
 pub(crate) async fn apply(engine: &Engine, req: &SetupRequest) -> RamariaResult<BackendConfig> {
     // ---- 线上 provider 必须有 API key（缺失属参数错误，先于任何写入返回） ----
@@ -214,16 +230,25 @@ pub(crate) async fn apply(engine: &Engine, req: &SetupRequest) -> RamariaResult<
         )));
     }
 
-    // ---- 后端配置：保留已保存的嵌入模型路径 ----
-    let existing_embedding_path = engine
-        .storage_ref()
-        .get_backend_config()
-        .await?
-        .and_then(|config| config.embedding_model_path);
+    // ---- 后端配置：继承已保存的嵌入模型标识与路径（只读一次） ----
+    let existing = engine.storage_ref().as_ref().get_backend_config().await?;
 
     let mut config =
         BackendConfig::new_with_defaults(req.provider, req.base_url.clone(), req.model_id.clone());
-    config.embedding_model_path = existing_embedding_path;
+    if let Some(existing) = existing {
+        config.embedding_model_id = existing.embedding_model_id;
+        config.embedding_model_path = existing.embedding_model_path;
+    }
+
+    // ---- 请求给出的路径优先；空白视为"未提供" ----
+    if let Some(path) = req
+        .embedding_model_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        config.embedding_model_path = Some(path.to_string());
+    }
 
     // ---- 密钥入 keychain + 配置落库 + provider 热替换（模型管理用例，单份实现） ----
     crate::model::update_backend_config(engine, &config, req.api_key.as_deref()).await?;

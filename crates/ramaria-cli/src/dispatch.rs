@@ -23,8 +23,16 @@ use crate::cli::{
 
 pub(crate) async fn dispatch(engine: &Arc<Engine>, cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Commands::Setup => {
-            commands::setup::run(engine, cli.skip_validate).await?;
+        Commands::Setup(args) => {
+            let options = commands::setup::SetupOptions {
+                provider: args.provider,
+                base_url: args.base_url,
+                model: args.model,
+                api_key: args.api_key,
+                embedding_path: args.embedding_path,
+                no_validate: args.no_validate,
+            };
+            commands::setup::run(engine, options).await?;
         }
         Commands::Ask {
             message,

@@ -62,6 +62,8 @@ pub async fn run_setup(
         model_id: model_id.clone(),
         base_url: base_url.clone(),
         api_key,
+        embedding_model_path: None,
+        skip_validate: false,
     };
     state
         .engine

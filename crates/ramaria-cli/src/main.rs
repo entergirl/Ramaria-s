@@ -43,17 +43,17 @@ async fn main() {
 
     let json_mode = cli.json;
 
-    // 交互式命令与 --json 不兼容：显式 unsupported（错误信封 + exit 4）。
+    // 不支持 JSON 输出的命令：显式 unsupported（错误信封 + exit 4）。
     // 在引擎初始化前拦截，避免生成 config.toml 等副作用。
     if cli.json {
-        let interactive = match &cli.command {
-            Commands::Setup => Some("setup"),
+        let json_unsupported = match &cli.command {
+            Commands::Setup(_) => Some("setup"),
             Commands::Chat => Some("chat"),
             _ => None,
         };
-        if let Some(name) = interactive {
+        if let Some(name) = json_unsupported {
             let err = anyhow::anyhow!(RamariaError::validation(format!(
-                "{name} 为交互式命令，不支持 --json 输出"
+                "{name} 不支持 --json 输出"
             )));
             exit_with_error(&err, true);
         }

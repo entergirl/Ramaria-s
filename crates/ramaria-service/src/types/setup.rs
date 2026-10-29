@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - 状态检查结果同时服务于缺项诊断与设置页展示（is_complete / missing_items）
-//! - 设置请求承载后端选择；API key 仅经 OS keychain 落盘，不写入配置表
+//! - 设置请求承载后端选择、嵌入路径覆盖与跳过探测开关；API key 仅经 OS keychain 落盘，不写入配置表
 //! - 嵌入模型校验失败不返回错误，以 valid=false + reason 表达
 //! - 降级原因供设置页翻译为可操作提示，非降级状态下不产生枚举值
 
@@ -67,6 +67,10 @@ impl SetupStatus {
 /// - `base_url`: API 基础地址。
 /// - `api_key`: 线上 provider 的 API key；本地 provider 忽略。
 ///   仅经 OS keychain 落盘，不写入配置表。
+/// - `embedding_model_path`: 嵌入模型路径覆盖；`None` 或空白表示保留现有配置
+///   （已保存的 `embedding_model_id` 与路径均不丢）。
+/// - `skip_validate`: 为 true 时跳过末尾 LLM 健康探测，配置与完成标记照常写入，
+///   状态按配置完整性判定（供脚本与评测前置使用）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetupRequest {
     pub provider: LlmProvider,
@@ -74,6 +78,10 @@ pub struct SetupRequest {
     pub base_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_model_path: Option<String>,
+    #[serde(default)]
+    pub skip_validate: bool,
 }
 
 // =========================================================

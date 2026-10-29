@@ -463,6 +463,28 @@ impl Lifecycle {
 
         info!("会话生命周期关停完成");
     }
+
+    /// 限时优雅关停：在总时限内等待 [`shutdown`](Self::shutdown) 收敛。
+    ///
+    /// 参数:
+    /// - `total`: 从调用开始计算的总等待上限。
+    ///
+    /// 返回:
+    /// - 无返回值；正常收敛与超时都不向上抛错。
+    ///
+    /// 说明:
+    /// - 正常收敛时与 [`Self::shutdown`] 等价；超时只记 warn，不上抛、不 panic；
+    /// - 与 `shutdown` 一样可重复调用；
+    /// - 超时后放弃等待在途封存（进程即将退出），本次调用不保证会话已落库。
+    pub async fn shutdown_with_timeout(&self, total: Duration) {
+        match tokio::time::timeout(total, self.shutdown()).await {
+            Ok(()) => {}
+            Err(_) => warn!(
+                timeout_millis = total.as_millis(),
+                "生命周期关停未在时限内完成，放弃等待"
+            ),
+        }
+    }
 }
 
 /// 夹取配置侧的空闲检查间隔到下限（防配置误设过小造成热循环）。

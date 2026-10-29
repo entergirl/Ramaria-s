@@ -6,6 +6,7 @@
 //! - 空闲线程：超时自动封存、阈值热更新、活跃指针一致性清理、状态机与事实对齐
 //! - 装配口径：desktop / mcp / none 三种选项的循环拉起差异与关停幂等
 //! - 降级：LLM 恒失败时仍按"会话已关闭"收尾并登记补偿任务
+//! - 限时关停：总时限内收敛，超时立即返回且不 panic
 
 use super::*;
 use crate::test_support::{
@@ -496,7 +497,9 @@ async fn shutdown_closes_active_session_and_stops_loops() {
     assert!(lifecycle.idle_loop_running(), "拉起后空闲循环应运行");
     assert!(lifecycle.l2_l3_running(), "拉起后 L2/L3 循环应运行");
 
-    lifecycle.shutdown().await;
+    lifecycle
+        .shutdown_with_timeout(Duration::from_secs(5))
+        .await;
 
     assert!(
         lifecycle.shutdown_flag().load(Ordering::Acquire),
@@ -520,6 +523,29 @@ async fn shutdown_closes_active_session_and_stops_loops() {
             .len(),
         1,
         "shutdown 应生成 L1 摘要"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// shutdown_with_timeout：总时限内未收敛时立即返回，不 panic（不要求会话已封存）。
+#[tokio::test]
+async fn shutdown_with_timeout_returns_on_expiry() {
+    let (engine, storage, dir) = engine_with_l1_reply("life-shutdown-timeout", L1_JSON_REPLY).await;
+    seed_persona(&storage, "char-0001").await;
+    let session = seed_session_with_messages(&storage, "char-0001", 4, now_ms()).await;
+    let engine = Arc::new(engine);
+    let lifecycle = engine.start_lifecycle(LifecycleOptions::none());
+    lifecycle.set_active_session_id(Some(session));
+    lifecycle.touch_session(session);
+
+    let started = Instant::now();
+    lifecycle
+        .shutdown_with_timeout(Duration::from_nanos(1))
+        .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "超时应立即返回，不等待封存完成"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

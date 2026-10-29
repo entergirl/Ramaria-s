@@ -1,6 +1,8 @@
-//! crates/ramaria-cli/src/commands/setup/tests.rs - setup 旧人格文件回退单元测试
+//! crates/ramaria-cli/src/commands/setup/tests.rs - setup 参数装配与旧人格文件回退单元测试
 //!
 //! 设计特点:
+//! - 非交互参数装配（纯函数）：provider 写法与非法值、默认地址与模型、空白参数归一
+//! - 交互模式参数一致性：非交互参数缺 `--provider` 报校验错误，`--no-validate` 放行
 //! - 覆盖旧单文件路径（`config/persona.toml` → `rama-0001`）的导入结果：新建 / 跳过 / 失败
 //! - 断言落库字段与文件等价：`config` 为文件全文、名称取 `assistant_name`、缺失回退 Ramaria
 //! - 已存在记录不覆盖（名称 / 配置 / updated_at 均不变）
@@ -49,6 +51,155 @@ async fn cleanup(engine: &Arc<Engine>, dir: PathBuf) {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// =========================================================
+// 非交互参数装配（纯函数）
+// =========================================================
+
+/// provider 文本解析：三种 LM Studio 写法与线上 provider 均大小写不敏感。
+#[test]
+fn parse_provider_accepts_known_spellings() {
+    for value in ["lmstudio", "lm_studio", "lm-studio", "LM_Studio"] {
+        assert_eq!(
+            parse_provider(value).expect("LM Studio 写法应解析成功"),
+            LlmProvider::LmStudio,
+            "取值 {value} 应解析为 LM Studio"
+        );
+    }
+    assert_eq!(
+        parse_provider("DeepSeek").expect("deepseek 应解析成功"),
+        LlmProvider::DeepSeek
+    );
+    assert_eq!(
+        parse_provider(" OpenAI ").expect("openai 应解析成功（忽略首尾空白）"),
+        LlmProvider::OpenAI
+    );
+}
+
+/// provider 文本解析：未知取值返回校验错误，文案点明可选值。
+#[test]
+fn parse_provider_rejects_unknown_value() {
+    let err = parse_provider("moon-shot").expect_err("未知 provider 应报错");
+    let ramaria = err
+        .chain()
+        .find_map(|e| e.downcast_ref::<RamariaError>())
+        .expect("错误链应含服务层错误");
+    assert_eq!(ramaria.category(), "validation", "未知 provider 属参数错误");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("不支持的 provider"),
+        "文案应点明不支持的取值: {message}"
+    );
+    assert!(message.contains("openai"), "文案应列出可选值: {message}");
+}
+
+/// 非交互装配：地址与模型缺省取 provider 默认值，显式值优先。
+#[test]
+fn build_request_uses_provider_defaults() {
+    let local = build_non_interactive_request("lm_studio", None, None, None, None, false)
+        .expect("本地 provider 装配应成功");
+    assert_eq!(local.provider, LlmProvider::LmStudio);
+    assert_eq!(local.base_url, "http://localhost:1234/v1");
+    assert_eq!(local.model_id, "local-model");
+    assert_eq!(local.api_key, None);
+    assert_eq!(local.embedding_model_path, None);
+    assert!(!local.skip_validate, "未给 --no-validate 时应执行探测");
+
+    let online = build_non_interactive_request(
+        "deepseek",
+        None,
+        None,
+        Some("  sk-test  ".to_string()),
+        None,
+        true,
+    )
+    .expect("线上 provider 装配应成功");
+    assert_eq!(online.base_url, "https://api.deepseek.com/v1");
+    assert_eq!(online.model_id, "deepseek-chat");
+    assert_eq!(online.api_key.as_deref(), Some("sk-test"));
+    assert!(online.skip_validate, "no_validate 应映射为 skip_validate");
+
+    let overridden = build_non_interactive_request(
+        "openai",
+        Some("http://127.0.0.1:8000/v1".to_string()),
+        Some("gpt-4o".to_string()),
+        None,
+        None,
+        false,
+    )
+    .expect("覆盖值装配应成功");
+    assert_eq!(overridden.base_url, "http://127.0.0.1:8000/v1");
+    assert_eq!(overridden.model_id, "gpt-4o");
+}
+
+/// 非交互装配：空白嵌入路径视为未提供（服务层据此保留已保存路径）。
+#[test]
+fn build_request_treats_blank_embedding_path_as_none() {
+    let blank = build_non_interactive_request(
+        "lm_studio",
+        None,
+        None,
+        None,
+        Some("   ".to_string()),
+        false,
+    )
+    .expect("空白路径应被忽略");
+    assert_eq!(blank.embedding_model_path, None);
+
+    let path = build_non_interactive_request(
+        "lm_studio",
+        None,
+        None,
+        None,
+        Some("  /models/bge-m3  ".to_string()),
+        false,
+    )
+    .expect("路径应被接受");
+    assert_eq!(path.embedding_model_path.as_deref(), Some("/models/bge-m3"));
+}
+
+// =========================================================
+// 交互模式参数一致性
+// =========================================================
+
+/// 交互模式参数一致性：`--no-validate` 放行；非交互参数缺 `--provider` 报校验错误。
+#[test]
+fn reject_non_interactive_args_without_provider_reports_validation() {
+    let interactive_only = SetupOptions {
+        provider: None,
+        base_url: None,
+        model: None,
+        api_key: None,
+        embedding_path: None,
+        no_validate: true,
+    };
+    assert!(
+        reject_non_interactive_args_without_provider(&interactive_only).is_ok(),
+        "--no-validate 不依赖 --provider，交互模式应放行"
+    );
+
+    let with_embedding = SetupOptions {
+        embedding_path: Some("  /models/bge  ".to_string()),
+        ..interactive_only
+    };
+    let err = reject_non_interactive_args_without_provider(&with_embedding)
+        .expect_err("无 --provider 时给出 --embedding-path 应报错");
+    let ramaria = err
+        .chain()
+        .find_map(|e| e.downcast_ref::<RamariaError>())
+        .expect("错误链应含服务层错误");
+    assert_eq!(ramaria.category(), "validation", "参数误用属校验错误");
+    let message = err.to_string();
+    assert!(
+        message.contains("--embedding-path") && message.contains("--provider"),
+        "文案应点明触发的参数与 --provider: {message}"
+    );
+}
+
+// =========================================================
+// 旧人格文件回退（真实 SQLite）
+// =========================================================
 
 /// 旧文件存在且库无 rama-0001：新建人格，字段与文件等价。
 #[tokio::test]

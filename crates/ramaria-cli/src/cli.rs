@@ -4,7 +4,7 @@
 //! - clap derive 定义顶层 `Cli` 与全部子命令结构，全局选项对所有命令可用
 //! - `Cli` 字段以 `pub(crate)` 暴露给入口与分发模块读取
 //! - 子命令枚举按命令族聚合，词表（list/show/import/…）与帮助分组一一对应；
-//!   探针命令族参数单独成文件（`cli/probe.rs`），经本模块转出
+//!   探针与首次配置命令族的参数单独成文件（`cli/probe.rs` / `cli/setup.rs`），经本模块转出
 //! - 参数值解析器（`parse_limit` / `parse_import_side`）与所校验字段就地定义
 //! - 顶层命令的新增须同步登记到 `main.rs` 的帮助分组表
 
@@ -12,10 +12,12 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-// 探针命令族参数单独成文件；经本模块转出保持 `crate::cli::ProbeArgs` 调用路径
+// 探针与首次配置命令族参数单独成文件；经本模块转出保持 `crate::cli::*` 调用路径
 mod probe;
+mod setup;
 
 pub(crate) use probe::ProbeArgs;
+pub(crate) use setup::SetupArgs;
 
 // =========================================================
 // CLI 参数定义
@@ -44,10 +46,6 @@ pub(crate) struct Cli {
     /// 自动确认所有确认点（隐私/删除/导入等）；非 TTY 且无 --yes 时不挂起、直接失败并提示
     #[arg(long, global = true)]
     pub(crate) yes: bool,
-
-    /// 跳过 LLM 连接验证（仅 setup 命令）
-    #[arg(long, global = true)]
-    pub(crate) skip_validate: bool,
 
     /// 以 JSON 信封输出结果（stdout 仅含 JSON；错误 code 复用 exit code 约定）
     #[arg(long, global = true)]
@@ -87,9 +85,9 @@ pub(crate) enum Commands {
     #[command(display_order = 11)]
     Chat,
 
-    /// 运行首次配置向导 [对话]
+    /// 运行首次配置向导（无 --provider 时交互，带 --provider 时非交互）[对话]
     #[command(display_order = 12)]
-    Setup,
+    Setup(SetupArgs),
 
     /// 查看记忆（L1 摘要 / L2 事件 / L3 性格）[记忆]
     #[command(display_order = 20)]

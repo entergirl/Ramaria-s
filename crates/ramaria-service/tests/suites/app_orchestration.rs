@@ -151,6 +151,8 @@ async fn run_setup_full_flow() {
             model_id: String::new(),
             base_url: health_url,
             api_key: None,
+            embedding_model_path: None,
+            skip_validate: false,
         })
         .await
         .unwrap();

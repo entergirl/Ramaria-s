@@ -25,6 +25,8 @@ fn local_request(base_url: &str) -> SetupRequest {
         model_id: "local-model".to_string(),
         base_url: base_url.to_string(),
         api_key: None,
+        embedding_model_path: None,
+        skip_validate: false,
     }
 }
 
@@ -222,6 +224,65 @@ async fn apply_persists_config_and_preserves_embedding_path() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 重跑首次配置：已保存的嵌入模型标识与路径保留，请求给出的路径才覆盖。
+#[tokio::test]
+async fn run_setup_preserves_existing_embedding_config() {
+    let health_url = spawn_mock_health_server().await;
+    let (engine, storage, dir) = engine_with_db("setup-embedding-merge").await;
+
+    // 预置嵌入模型标识与路径：模拟"上一次已配置嵌入模型"
+    let mut seeded = BackendConfig::lm_studio_default();
+    seeded.embedding_model_id = Some("text-embedding-3-small".to_string());
+    seeded.embedding_model_path = Some("/saved/embedding/model".to_string());
+    storage
+        .save_backend_config(&seeded)
+        .await
+        .expect("保存后端配置应成功");
+
+    // 请求不带路径：标识与路径都保留
+    engine
+        .run_setup(&local_request(&health_url))
+        .await
+        .expect("首次配置应成功");
+    let saved = storage
+        .get_backend_config()
+        .await
+        .expect("读取配置应成功")
+        .expect("配置应存在");
+    assert_eq!(
+        saved.embedding_model_id.as_deref(),
+        Some("text-embedding-3-small"),
+        "重跑向导不得清空已保存的嵌入模型标识"
+    );
+    assert_eq!(
+        saved.embedding_model_path.as_deref(),
+        Some("/saved/embedding/model"),
+        "未提供路径时应保留已保存的嵌入模型路径"
+    );
+
+    // 请求带新路径：只覆盖路径，标识保留
+    let mut request = local_request(&health_url);
+    request.embedding_model_path = Some("  /new/embedding/model  ".to_string());
+    engine.run_setup(&request).await.expect("重跑应成功");
+    let saved = storage
+        .get_backend_config()
+        .await
+        .expect("读取配置应成功")
+        .expect("配置应存在");
+    assert_eq!(
+        saved.embedding_model_path.as_deref(),
+        Some("/new/embedding/model"),
+        "请求给出的路径应覆盖已保存路径（首尾空白已清理）"
+    );
+    assert_eq!(
+        saved.embedding_model_id.as_deref(),
+        Some("text-embedding-3-small"),
+        "覆盖路径不应丢弃嵌入模型标识"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 状态推进：探测失败一律 Degraded；探测通过按缺项诊断判定（含嵌入可用性）。
 #[tokio::test]
 async fn advance_state_follows_probe_and_diagnostics() {
@@ -365,6 +426,8 @@ async fn run_setup_rejects_online_provider_without_key() {
             model_id: "deepseek-chat".to_string(),
             base_url: "https://api.deepseek.com/v1".to_string(),
             api_key: None,
+            embedding_model_path: None,
+            skip_validate: false,
         })
         .await
         .expect_err("缺少 API key 应报错");
@@ -490,6 +553,49 @@ async fn run_setup_writes_completion_marker() {
         .expect("标记应已写入");
     let completed_at: i64 = value.parse().expect("标记应为毫秒时间戳");
     assert!(completed_at > 0, "时间戳应为正值: {value}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 按请求跳过健康探测：配置与完成标记照常写入，状态按配置完整性判定。
+///
+/// 说明:
+/// - base_url 指向不可达地址且 mock 健康探测全部失败：若探测未被跳过，
+///   3 次失败会把状态置为 `Degraded`；
+/// - 嵌入可用时，跳过探测后状态直接为 `Ready`。
+#[tokio::test]
+async fn run_setup_skips_health_probe_when_requested() {
+    let embedding: Arc<dyn EmbeddingProvider> = Arc::new(DeterministicEmbedding::new());
+    let (engine, _storage, dir) = engine_with_llm_config_and_embedding(
+        "setup-skip-validate",
+        MockLlm::local().with_health_failures(5),
+        ramaria_core::config::RamariaConfig::default(),
+        Some(embedding),
+    )
+    .await;
+
+    let mut request = local_request("http://127.0.0.1:9/v1");
+    request.skip_validate = true;
+    let state = engine
+        .run_setup(&request)
+        .await
+        .expect("跳过探测的首次配置应成功");
+    assert_eq!(
+        state,
+        AppState::Ready,
+        "跳过探测时状态按配置完整性判定（探测失败会降级）"
+    );
+    assert_eq!(engine.current_state(), AppState::Ready);
+
+    let value = engine
+        .setting_get(SETUP_COMPLETED_KEY)
+        .await
+        .expect("读取标记应成功")
+        .expect("标记应已写入");
+    assert!(
+        value.parse::<i64>().map(|ts| ts > 0).unwrap_or(false),
+        "完成标记应为毫秒时间戳: {value}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

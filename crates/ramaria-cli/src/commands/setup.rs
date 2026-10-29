@@ -1,113 +1,97 @@
 //! crates/ramaria-cli/src/commands/setup.rs - 首次配置向导
 //!
 //! 设计特点:
-//! - 交互式步骤: 选 provider → 配地址 → 配嵌入模型路径（可选）→ 输 API key（线上）
-//! - 委托服务层用例完成配置写入（密钥入 keychain → 配置落库 → provider 热替换 →
-//!   文件侧 [backend] 同步）与状态刷新
-//! - 可选验证 provider 连接可用性（与首次配置同一探测实现）
-//! - 本地 LM Studio 跳过 API key 步骤
-//! - 人格初始化: 扫描 config/personas/ 目录下所有 .toml 文件，批量创建 persona
-//! - 错误信息清晰，每步可重试
+//! - 双入口: 无 `--provider` 时逐项提问（选 provider → 配地址 → 配嵌入路径 → 输 API key），
+//!   给出 `--provider` 时按参数装配，全程不读 stdin
+//! - 配置收口服务层用例: 密钥入 keychain → 后端配置落库 → provider 热替换 → 健康探测 →
+//!   完成标记均经 `Engine::run_setup`，入口不写第二套配置逻辑
+//! - 非交互终端且未给出 `--provider` 时直接报校验错误，不进入 read_line 等待
+//! - `--no-validate` 跳过末尾健康探测；本地 LM Studio 跳过 API key 步骤
+//! - 人格初始化在配置完成后执行（扫描 config/personas/ 目录批量创建 persona）
+//! - 状态回执区分 NeedsSetup / Degraded / Ready，降级不阻塞对话
 
 use anyhow::Context;
-use ramaria_core::types::BackendConfig;
-use ramaria_service::{Engine, PersonaFileAction, PersonaLoadMode};
+use ramaria_core::error::RamariaError;
+use ramaria_core::types::{AppState, LlmProvider};
+use ramaria_service::{Engine, PersonaFileAction, PersonaLoadMode, SetupRequest};
+use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::Arc;
 
-/// 运行首次配置向导。
+/// 首次配置向导的入口参数（来自 `setup` 子命令）。
+///
+/// 字段约定:
+/// - `provider`: LLM 服务类型文本；为 Some 时走非交互，None 时进入交互提问。
+/// - `base_url` / `model`: 覆盖值；空白或 None 时取 provider 默认值。
+/// - `api_key`: 线上 provider 的密钥；命令行未给出时，非交互路径回退
+///   `RAMARIA_API_KEY` 环境变量（交互模式不读取，避免环境变量被误判为参数）。
+/// - `embedding_path`: 嵌入模型目录覆盖；空白或 None 保留已保存路径。
+/// - `no_validate`: 跳过末尾健康探测（配置与完成标记照常写入）。
+///
+/// 说明: `base_url` / `model` / `api_key` / `embedding_path` 属非交互参数，
+/// 只与 `provider` 一起使用；`no_validate` 两种模式均可用。
+pub struct SetupOptions {
+    pub provider: Option<String>,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    pub api_key: Option<String>,
+    pub embedding_path: Option<String>,
+    pub no_validate: bool,
+}
+
+/// 运行首次配置向导（交互或非交互）。
 ///
 /// 参数:
 /// - `engine`: 服务层引擎引用（初始状态应为 NeedsSetup）。
-/// - `skip_validate`: 跳过 LLM 连接验证（默认 false，用户可传入 true）。
-pub async fn run(engine: &Arc<Engine>, skip_validate: bool) -> anyhow::Result<()> {
+/// - `opts`: 命令参数；`provider` 为 Some 时非交互，None 时进入交互提问。
+///
+/// 返回:
+/// - 配置写入、完成标记与人格初始化完成后返回；降级状态不算失败（以 warn 提示）。
+///
+/// 说明:
+/// - 非交互终端且未给出 `--provider` 时返回 `Validation`，不进入 read_line 等待；
+/// - 交互模式下给出任一非交互参数（base_url / model / api_key / embedding_path）返回
+///   `Validation`，避免参数被静默忽略；
+/// - 配置写入与状态推进统一由 `Engine::run_setup` 完成，入口只做参数装配与结果展示。
+pub async fn run(engine: &Arc<Engine>, opts: SetupOptions) -> anyhow::Result<()> {
     crate::ui::separator();
     println!("  Ramaria 首次配置向导");
     crate::ui::separator();
     println!();
 
-    // ---- Step 1: 选择 Provider ----
-    let provider = select_provider()?;
-
-    // ---- Step 2: 配置 base_url ----
-    let base_url = configure_base_url(provider)?;
-
-    // ---- Step 3: 配置 embedding 模型路径（可选，回车跳过）----
-    let embedding_model_path = configure_embedding_model_path()?;
-
-    // ---- Step 4: 配置 API key（仅线上 provider）----
-    let api_key = if provider.is_online() {
-        Some(configure_api_key(engine, provider)?)
-    } else {
-        None
-    };
-
-    // ---- Step 5: 构建 BackendConfig 并保存 ----
-    // 继承已有配置中的 embedding 模型设置（重跑向导时不丢配置），
-    // 向导新输入的路径优先。
-    let existing = engine
-        .backend_config()
-        .await?
-        .unwrap_or_else(BackendConfig::lm_studio_default);
-    let config = BackendConfig {
-        provider,
-        base_url: base_url.clone(),
-        embedding_model_id: existing.embedding_model_id,
-        embedding_model_path: embedding_model_path.or(existing.embedding_model_path),
-        temperature: 0.3,
-        max_tokens: 1024,
-        capability: ramaria_core::types::ModelCapability {
+    let request = match opts.provider.as_deref() {
+        Some(provider) => build_non_interactive_request(
             provider,
-            model_id: default_model_id(provider).to_string(),
-            base_url,
-            supports_streaming: true,
-            supports_json_mode: provider.is_online(),
-            context_window: 4096,
-            max_output_tokens: 2048,
-        },
+            opts.base_url,
+            opts.model,
+            resolve_api_key(opts.api_key),
+            opts.embedding_path,
+            opts.no_validate,
+        )?,
+        None => {
+            // 交互模式只接受 --no-validate：其余参数无从对应，静默忽略会让用户误以为已生效
+            reject_non_interactive_args_without_provider(&opts)?;
+            // 无参数时需要 stdin 提问；非 TTY 下提问会阻塞，直接给出可操作错误
+            if !std::io::stdin().is_terminal() {
+                return Err(anyhow::anyhow!(RamariaError::validation(
+                    "当前环境非交互式终端；请提供 --provider 及配套参数"
+                )));
+            }
+            build_interactive_request(engine, opts.no_validate)?
+        }
     };
 
-    // 保存后端配置（服务层用例：密钥入 keychain → 配置落库 → provider 热替换 →
-    // 文件侧 [backend] 同步，保证下次启动以文件为准时不被模板覆盖）
-    engine
-        .update_backend_config(&config, api_key.as_deref())
-        .await
-        .context("保存后端配置失败")?;
+    // ---- 配置写入与状态推进（服务层单一入口：含完成标记与健康探测） ----
+    let state = engine.run_setup(&request).await.context("首次配置失败")?;
 
-    if api_key.is_some() {
-        let service = provider_service(provider);
-        crate::ui::success(&format!("API key 已安全保存到系统凭据管理器 ({service})"));
-    }
-
-    crate::ui::success("后端配置已保存");
-
-    // ---- Step 6: 创建初始 persona（扫描 personas/ 目录批量初始化）----
+    // ---- 人格初始化（配置就绪后执行，与桌面向导一致） ----
     create_initial_personas(engine).await?;
 
-    // ---- Step 7: 刷新应用状态 ----
-    let new_state = engine
-        .refresh_setup_state()
-        .await
-        .context("刷新应用状态失败")?;
-
-    crate::ui::info(&format!("应用状态: {new_state}"));
-    if new_state == ramaria_core::types::AppState::NeedsSetup {
+    crate::ui::info(&format!("应用状态: {state}"));
+    if state == AppState::NeedsSetup {
         crate::ui::warn("应用仍需要进一步配置（如 embedding 模型下载）");
-    }
-
-    // ---- Step 8: 可选验证 LLM 连接 ----
-    if !skip_validate {
-        println!();
-        crate::ui::info("正在验证 LLM 连接...");
-        match validate_llm_connection(engine).await {
-            Ok(state) => {
-                crate::ui::success(&format!("LLM 连接验证通过，当前状态: {state}"));
-            }
-            Err(e) => {
-                crate::ui::warn(&format!("LLM 连接验证失败: {e}"));
-                crate::ui::info("配置已保存，可稍后在 config 中调整后重试");
-            }
-        }
+    } else if state == AppState::Degraded {
+        crate::ui::warn("配置已保存，当前以降级状态运行（LLM 不可达或嵌入模型缺失）");
     }
 
     crate::ui::separator();
@@ -115,14 +99,187 @@ pub async fn run(engine: &Arc<Engine>, skip_validate: bool) -> anyhow::Result<()
     Ok(())
 }
 
+/// 逐项提问组装首次配置请求（调用方已确认 stdin 为终端）。
+///
+/// 参数:
+/// - `engine`: 服务层引擎（读取已保存的 API key 供复用）。
+/// - `no_validate`: 跳过末尾健康探测。
+///
+/// 返回:
+/// - 可直接提交给 `Engine::run_setup` 的请求；模型标识取 provider 默认值，
+///   嵌入模型路径始终按向导提问（命令行预填由非交互模式承担）。
+fn build_interactive_request(
+    engine: &Arc<Engine>,
+    no_validate: bool,
+) -> anyhow::Result<SetupRequest> {
+    let provider = select_provider()?;
+    let base_url = configure_base_url(provider)?;
+    let embedding_model_path = configure_embedding_model_path()?;
+    let api_key = if provider.is_online() {
+        Some(configure_api_key(engine, provider)?)
+    } else {
+        None
+    };
+
+    Ok(SetupRequest {
+        provider,
+        model_id: default_model_id(provider).to_string(),
+        base_url,
+        api_key,
+        embedding_model_path,
+        skip_validate: no_validate,
+    })
+}
+
+// =========================================================
+// 非交互参数装配（纯函数，供脚本与单测使用）
+// =========================================================
+
+/// 交互模式下拒绝非交互专属参数。
+///
+/// 参数:
+/// - `opts`: 命令参数；`provider` 为 None 时期望其余非交互参数均为空。
+///
+/// 返回:
+/// - `Ok`: 未给 `provider` 且只带 `--no-validate`（或什么都没带）；
+/// - `Err`: 给了 `provider` 之外的非交互参数，错误为 `Validation` 并列出触发的参数。
+///
+/// 说明:
+/// - 交互模式按向导逐项提问，这些参数没有对应输入位；静默丢弃会让脚本误判已生效；
+/// - `--no-validate` 与模式无关，不参与拦截。
+fn reject_non_interactive_args_without_provider(opts: &SetupOptions) -> anyhow::Result<()> {
+    if opts.provider.is_some() {
+        return Ok(());
+    }
+
+    let provided: Vec<&str> = [
+        ("--base-url", &opts.base_url),
+        ("--model", &opts.model),
+        ("--api-key", &opts.api_key),
+        ("--embedding-path", &opts.embedding_path),
+    ]
+    .into_iter()
+    .filter(|(_, value)| has_text(value))
+    .map(|(flag, _)| flag)
+    .collect();
+
+    if provided.is_empty() {
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!(RamariaError::validation(format!(
+        "{} 需与 --provider 一起使用（交互模式按向导逐项提问）",
+        provided.join(" / ")
+    ))))
+}
+
+/// 解析线上 provider 的 API key：命令行优先，其次 `RAMARIA_API_KEY` 环境变量。
+///
+/// 参数:
+/// - `explicit`: `--api-key` 给出的值。
+///
+/// 返回:
+/// - 去首尾空白后的 key；命令行与环境变量都为空时为 None。
+///
+/// 说明:
+/// - 只在非交互路径调用：交互模式不读环境变量，避免被误判成命令行参数。
+fn resolve_api_key(explicit: Option<String>) -> Option<String> {
+    non_empty(explicit).or_else(|| non_empty(std::env::var("RAMARIA_API_KEY").ok()))
+}
+
+/// 可选文本参数是否有内容（去首尾空白后非空）。
+fn has_text(value: &Option<String>) -> bool {
+    value
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|text| !text.is_empty())
+}
+
+/// 解析 `--provider` 取值。
+///
+/// 参数:
+/// - `value`: 用户给定的 provider 文本（大小写不敏感，忽略首尾空白）。
+///
+/// 返回:
+/// - `Ok`: `lmstudio` / `lm_studio` / `lm-studio` / `deepseek` / `openai`；
+/// - `Err`: 其它取值，错误为 `Validation` 类别并列出可选值。
+fn parse_provider(value: &str) -> anyhow::Result<LlmProvider> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "lmstudio" | "lm_studio" | "lm-studio" => Ok(LlmProvider::LmStudio),
+        "deepseek" => Ok(LlmProvider::DeepSeek),
+        "openai" => Ok(LlmProvider::OpenAI),
+        _ => Err(anyhow::anyhow!(RamariaError::validation(format!(
+            "不支持的 provider: {value}（可选值: lmstudio / lm_studio / lm-studio / deepseek / openai）"
+        )))),
+    }
+}
+
+/// provider 的默认 API 基础地址。
+///
+/// 参数:
+/// - `provider`: LLM 服务类型。
+///
+/// 返回:
+/// - 本地 LM Studio 或未知类型为 `http://localhost:1234/v1`；
+///   线上 provider 返回各自官方地址。
+fn default_base_url(provider: LlmProvider) -> &'static str {
+    match provider {
+        LlmProvider::LmStudio => "http://localhost:1234/v1",
+        LlmProvider::DeepSeek => "https://api.deepseek.com/v1",
+        LlmProvider::OpenAI => "https://api.openai.com/v1",
+        _ => "http://localhost:1234/v1",
+    }
+}
+
+/// 按命令行参数组装首次配置请求（不读 stdin）。
+///
+/// 参数:
+/// - `provider`: provider 文本，取值见 [`parse_provider`]。
+/// - `base_url` / `model`: 空白或 None 时取 provider 默认值。
+/// - `api_key`: 空白或 None 视为未提供（线上 provider 由服务层校验报错）。
+/// - `embedding_path`: 空白或 None 表示保留已保存的嵌入模型路径。
+/// - `no_validate`: 映射为请求的 `skip_validate`。
+///
+/// 返回:
+/// - 可直接提交给 `Engine::run_setup` 的请求；provider 非法时返回 `Validation`。
+fn build_non_interactive_request(
+    provider: &str,
+    base_url: Option<String>,
+    model: Option<String>,
+    api_key: Option<String>,
+    embedding_path: Option<String>,
+    no_validate: bool,
+) -> anyhow::Result<SetupRequest> {
+    let provider = parse_provider(provider)?;
+    Ok(SetupRequest {
+        provider,
+        model_id: non_empty(model).unwrap_or_else(|| default_model_id(provider).to_string()),
+        base_url: non_empty(base_url).unwrap_or_else(|| default_base_url(provider).to_string()),
+        api_key: non_empty(api_key),
+        embedding_model_path: non_empty(embedding_path),
+        skip_validate: no_validate,
+    })
+}
+
+/// 清理可选文本参数：去首尾空白，空白结果视为未提供。
+///
+/// 参数:
+/// - `value`: 命令行或环境变量给出的可选文本。
+///
+/// 返回:
+/// - 非空时为去空白后的值，否则为 None。
+fn non_empty(value: Option<String>) -> Option<String> {
+    value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
 // =========================================================
 // 交互步骤
 // =========================================================
 
 /// 选择 provider 类型。
-fn select_provider() -> anyhow::Result<ramaria_core::types::LlmProvider> {
-    use ramaria_core::types::LlmProvider;
-
+fn select_provider() -> anyhow::Result<LlmProvider> {
     println!("请选择 AI 服务类型：");
     println!("  1) LM Studio     — 本地运行，无需联网（推荐新手）");
     println!("  2) DeepSeek      — 线上服务，需 API key");
@@ -151,14 +308,9 @@ fn select_provider() -> anyhow::Result<ramaria_core::types::LlmProvider> {
     }
 }
 
-/// 配置 base_url。
-fn configure_base_url(provider: ramaria_core::types::LlmProvider) -> anyhow::Result<String> {
-    let default_url = match provider {
-        ramaria_core::types::LlmProvider::LmStudio => "http://localhost:1234/v1",
-        ramaria_core::types::LlmProvider::DeepSeek => "https://api.deepseek.com/v1",
-        ramaria_core::types::LlmProvider::OpenAI => "https://api.openai.com/v1",
-        _ => "http://localhost:1234/v1",
-    };
+/// 配置 base_url（回车采用 provider 默认地址）。
+fn configure_base_url(provider: LlmProvider) -> anyhow::Result<String> {
+    let default_url = default_base_url(provider);
 
     println!();
     println!("API 地址（直接回车使用默认值）：");
@@ -195,10 +347,7 @@ fn configure_embedding_model_path() -> anyhow::Result<Option<String>> {
 }
 
 /// 配置 API key（仅线上 provider）。
-fn configure_api_key(
-    engine: &Arc<Engine>,
-    provider: ramaria_core::types::LlmProvider,
-) -> anyhow::Result<String> {
+fn configure_api_key(engine: &Arc<Engine>, provider: LlmProvider) -> anyhow::Result<String> {
     let service = provider_service(provider);
 
     // 尝试读取已有 key
@@ -232,42 +381,23 @@ fn configure_api_key(
 // =========================================================
 
 /// 根据 provider 返回 keychain service 名称。
-fn provider_service(provider: ramaria_core::types::LlmProvider) -> &'static str {
+fn provider_service(provider: LlmProvider) -> &'static str {
     match provider {
-        ramaria_core::types::LlmProvider::LmStudio => "lm_studio",
-        ramaria_core::types::LlmProvider::DeepSeek => "deepseek",
-        ramaria_core::types::LlmProvider::OpenAI => "openai",
+        LlmProvider::LmStudio => "lm_studio",
+        LlmProvider::DeepSeek => "deepseek",
+        LlmProvider::OpenAI => "openai",
         _ => "unknown",
     }
 }
 
 /// 根据 provider 返回默认模型 ID。
-fn default_model_id(provider: ramaria_core::types::LlmProvider) -> &'static str {
+fn default_model_id(provider: LlmProvider) -> &'static str {
     match provider {
-        ramaria_core::types::LlmProvider::LmStudio => "local-model",
-        ramaria_core::types::LlmProvider::DeepSeek => "deepseek-chat",
-        ramaria_core::types::LlmProvider::OpenAI => "gpt-4o-mini",
+        LlmProvider::LmStudio => "local-model",
+        LlmProvider::DeepSeek => "deepseek-chat",
+        LlmProvider::OpenAI => "gpt-4o-mini",
         _ => "unknown",
     }
-}
-
-/// 探测 LLM 连接并推进状态（与首次配置同一探测实现：最多 3 次、间隔 2 秒）。
-///
-/// 返回:
-/// - 探测通过 → 按缺项诊断判定（含真实嵌入可用性）后的应用状态；
-/// - 探测失败 → `Degraded`（不报错，用户可修正配置后重试）。
-async fn validate_llm_connection(
-    engine: &Arc<Engine>,
-) -> anyhow::Result<ramaria_core::types::AppState> {
-    let health_ok = engine.probe_llm_health().await;
-    if health_ok {
-        return engine
-            .refresh_setup_state()
-            .await
-            .context("刷新应用状态失败");
-    }
-    engine.set_state(ramaria_core::types::AppState::Degraded);
-    Ok(ramaria_core::types::AppState::Degraded)
 }
 
 /// 创建初始 persona：user-0001（系统默认） + 扫描 config/personas/ 目录下所有 .toml 文件。

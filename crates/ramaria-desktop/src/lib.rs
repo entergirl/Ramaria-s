@@ -6,6 +6,7 @@
 //! - 通过 Tauri managed state (`DesktopState`) 注入引擎 / 生命周期到所有 Command
 //! - 全部业务命令经服务层用例执行；桌面只保留事件桥、托盘与通知等宿主能力
 //! - 系统托盘在 Tauri setup 钩子中初始化
+//! - 退出路径限时停止通道并封存活跃会话，超时只记 warn，不阻塞进程退出
 //!
 //! 日志与隐私:
 //! - 默认只开 `info` 级：桌面 crate 的 debug 日志含运行细节，而日志文件会随
@@ -135,8 +136,9 @@ pub fn run() {
         eval_allowed_dirs: std::sync::Mutex::new(Vec::new()),
         dialog_grants: std::sync::Mutex::new(crate::path_grants::DialogGrants::new()),
     };
-    // 退出路径需要独立持有管理器句柄（state 随构建移入 Tauri 管理器）
+    // 退出路径需要独立持有管理器与生命周期句柄（state 随构建移入 Tauri 管理器）
     let channel_manager = state.channel_manager.clone();
+    let lifecycle = Arc::clone(&state.lifecycle);
 
     // 构建 Tauri 应用
     let builder = tauri::Builder::default()
@@ -298,11 +300,25 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("构建 Tauri 应用失败");
     app.run(move |_app_handle, event| {
-        // 退出前停止通道运行时（限时等待在途编排退出；失败仅忽略，进程即将结束）
+        // 退出前先停通道、再封存活跃会话；外层总时限兜住两项，超时只记 warn（进程即将退出）
         if let tauri::RunEvent::Exit = event {
-            let _ = tauri::async_runtime::block_on(async {
-                tokio::time::timeout(std::time::Duration::from_secs(5), channel_manager.stop())
+            tauri::async_runtime::block_on(async {
+                let shutdown = async {
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        channel_manager.stop(),
+                    )
+                    .await;
+                    lifecycle
+                        .shutdown_with_timeout(std::time::Duration::from_secs(15))
+                        .await;
+                };
+                if tokio::time::timeout(std::time::Duration::from_secs(20), shutdown)
                     .await
+                    .is_err()
+                {
+                    tracing::warn!(timeout_seconds = 20, "退出关停未在总时限内完成，放弃等待");
+                }
             });
         }
     });
