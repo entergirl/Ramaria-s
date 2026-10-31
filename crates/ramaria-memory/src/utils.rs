@@ -103,6 +103,71 @@ pub fn extract_first_json_object(text: &str) -> Option<String> {
     }
 }
 
+/// 修复文本中不匹配的右括号（`}` / `]`）。
+///
+/// 策略:
+/// - 用括号栈跟踪 `{` / `[`，字符串内的括号不参与计数；
+/// - 右括号与栈顶不匹配时丢弃该字符，其余字符原样保留；
+/// - 没有丢弃任何字符时返回 `None`，避免对合法文本做改写。
+///
+/// 说明:
+/// - 本地模型偶发在数组元素后多写一个 `}`，严格解析会整段失败；
+/// - 修复后仍需调用方重新提取 JSON 对象并解析，函数本身不校验合法性。
+pub fn repair_unbalanced_braces(text: &str) -> Option<String> {
+    let mut stack: Vec<char> = Vec::new();
+    let mut output = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut removed = 0usize;
+
+    for ch in text.chars() {
+        if in_string {
+            output.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                in_string = true;
+                output.push(ch);
+            }
+            '{' => {
+                stack.push('{');
+                output.push(ch);
+            }
+            '[' => {
+                stack.push('[');
+                output.push(ch);
+            }
+            '}' => {
+                if stack.last() == Some(&'{') {
+                    stack.pop();
+                    output.push(ch);
+                } else {
+                    removed += 1;
+                }
+            }
+            ']' => {
+                if stack.last() == Some(&'[') {
+                    stack.pop();
+                    output.push(ch);
+                } else {
+                    removed += 1;
+                }
+            }
+            _ => output.push(ch),
+        }
+    }
+
+    if removed == 0 { None } else { Some(output) }
+}
+
 /// 提取文本中第一个完整 JSON 数组 `[...]`。
 ///
 /// 策略:
@@ -248,6 +313,23 @@ mod tests {
         );
         // 无 JSON → None
         assert!(extract_first_json_object("纯文本无JSON").is_none());
+    }
+
+    // ---- repair_unbalanced_braces ----
+
+    #[test]
+    fn repair_unbalanced_braces_cases() {
+        // 数组元素后多一个右括号 → 修复后可解析
+        let broken = r#"{"summary":"x","evidence_notes":[{"text":"a"},{"text":"b"}}]}"#;
+        let repaired = repair_unbalanced_braces(broken).expect("应检测到不匹配的右括号");
+        let value: serde_json::Value =
+            serde_json::from_str(&repaired).expect("修复后应为合法 JSON");
+        assert_eq!(value["evidence_notes"].as_array().map(Vec::len), Some(2));
+
+        // 合法 JSON 不做改写
+        assert!(repair_unbalanced_braces(r#"{"a":[1,2],"b":{"c":"}"}}"#).is_none());
+        // 字符串内的右括号不参与计数
+        assert!(repair_unbalanced_braces(r#"{"a":"x}y"}"#).is_none());
     }
 
     // ---- extract_first_json_array ----

@@ -132,6 +132,27 @@ pub trait StoreCrud: Send + Sync {
         ))
     }
 
+    /// 创建带来源通道且指定开始时间的 session（历史写入专用）。
+    ///
+    /// 职责:
+    /// - 历史语料按首条消息时间还原会话时间线，避免"写入时刻"污染 L1 时间范围
+    ///   与 L2 时间衰减。
+    ///
+    /// 默认实现:
+    /// - 忽略 `started_at`，回退到 [`create_session_in_channel`]（未覆写后端保持原行为）；
+    ///   真实 SQLite 存储覆写为按给定时间写入。
+    async fn create_session_in_channel_at(
+        &self,
+        persona_uid: Option<&str>,
+        channel: &str,
+        external_ref: Option<&str>,
+        started_at: i64,
+    ) -> RamariaResult<Session> {
+        let _ = started_at;
+        self.create_session_in_channel(persona_uid, channel, external_ref)
+            .await
+    }
+
     /// 按 `(channel, external_ref)` 查询活跃会话。
     ///
     /// 职责:

@@ -136,6 +136,10 @@ pub use proactive::{ProactiveMessage, ProactivePersonaView, ProactiveSink, Proac
 pub use ramaria_memory::preset::{PresetPreview, PreviewMode};
 // Token 估算 re-export：评测层按产品口径计量注入 token，不复制实现、不直连 memory
 pub use ramaria_memory::token_budget::estimate_tokens;
+// 提示词模板版本 re-export：评测 manifest 记录生成模板口径，不新增 memory 依赖
+pub use ramaria_memory::prompt::PROMPT_TEMPLATE_VERSION;
+// 数据库 schema 版本 re-export：评测清单比对建库口径，不新增 storage 依赖
+pub use ramaria_storage::repo::schema_meta::CURRENT_SCHEMA_VERSION as DB_SCHEMA_VERSION;
 // 召回轨迹 re-export：评估侧读取轨迹时经服务层取用，不新增直连 memory crate 的依赖
 pub use ramaria_memory::trace::{
     BudgetTrace, ChannelCandidate, ChannelTrace, DropReason, DroppedTrace, FusedEntryTrace,
@@ -155,8 +159,8 @@ pub use types::{
     DEFAULT_MAX_ITEMS, DEFAULT_PERSONA_UID, DataMaturityView, DegradedReason, EmbeddingModelView,
     EmbeddingValidation, EvidenceEventView, EvidenceL1SourceView, FactBrowsePage,
     FactBrowseRequest, FactDetailView, FactEntryView, FactView, GroupedFactsView,
-    HistoryMessageView, HistoryRequest, HistoryResult, IngestOutcome, IngestRequest,
-    KeywordEntryView, KeywordPoolView, KeywordSeedItem, KeywordSeedOutcome,
+    HistoricalIngestRequest, HistoryMessageView, HistoryRequest, HistoryResult, IngestOutcome,
+    IngestRequest, KeywordEntryView, KeywordPoolView, KeywordSeedItem, KeywordSeedOutcome,
     KeywordSuggestionOutcome, L1BrowsePage, L1BrowseRequest, L1MemoryView, L2BrowsePage,
     L2BrowseRequest, L2EventView, L3TraitView, LocalImageSendOutcome, LocalImageSendRequest,
     MAX_ITEMS_LIMIT, PendingAliasView, PersonaCardRequest, PersonaCardView, PersonaFileAction,
@@ -165,7 +169,7 @@ pub use types::{
     RecallLayer, RecallMode, RecallRequest, RecallResult, RecallStats, RecallWithTrace,
     SealOutcome, SessionBrowsePage, SessionBrowseRequest, SessionDetailView, SessionMessageView,
     SessionMessagesRequest, SessionMessagesView, SessionSummaryView, SetupRequest, SetupStatus,
-    StyleView, TraitDetailView, TraitEvidenceRequest, TraitEvidenceView, TraitView,
+    StyleView, TimedTurn, TraitDetailView, TraitEvidenceRequest, TraitEvidenceView, TraitView,
 };
 pub use update::{UpdateStatus, check_update};
 pub use utt::UttRebuildOutcome;

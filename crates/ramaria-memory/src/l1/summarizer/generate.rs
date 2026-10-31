@@ -298,6 +298,24 @@ impl<'a> L1Summarizer<'a> {
             return Ok(parsed);
         }
 
+        // 步骤 4: 修复不匹配的右括号后重新提取
+        if let Some(repaired) = utils::repair_unbalanced_braces(raw) {
+            if let Some(parsed) =
+                utils::extract_first_json_object(&repaired).and_then(|json_segment| {
+                    serde_json::from_str::<L1SummaryResponse>(&json_segment).ok()
+                })
+            {
+                debug!("修复括号后解析成功");
+                return Ok(parsed);
+            }
+        }
+
+        // 步骤 5: 按字段名降级抽取（容忍缺逗号 / 尾随逗号 / 多余括号）
+        if let Some(parsed) = recover_summary_fields(raw) {
+            debug!("按字段降级抽取后解析成功");
+            return Ok(parsed);
+        }
+
         // 全部失败
         // 隐私红线：LLM 原始响应不落日志，仅记录长度供诊断
         warn!(
@@ -440,4 +458,101 @@ impl<'a> L1Summarizer<'a> {
 /// - alias / pending 行不作为建议目标——建议指向必须是规范词行。
 fn is_canonical_row(row: &KeywordPoolRow) -> bool {
     row.canonical_id.is_none() && matches!(row.alias_status.as_deref(), None | Some("canonical"))
+}
+// =========================================================
+// 字段级降级抽取
+// =========================================================
+
+/// 从无法解析的响应中按字段名抽取摘要字段。
+///
+/// 说明:
+/// - 只在严格解析、剥标签、提取对象与括号修复都失败后使用；
+/// - 容忍对象间缺逗号、尾随逗号与多余括号，按字段名逐个取值；
+/// - 证据线索不做猜测，留空由校验阶段降级；
+/// - 抽取不到非空 `summary` 时返回 `None`。
+fn recover_summary_fields(raw: &str) -> Option<L1SummaryResponse> {
+    let summary = extract_json_string(raw, "summary")?;
+    if summary.trim().is_empty() {
+        return None;
+    }
+    Some(L1SummaryResponse {
+        summary: Some(summary),
+        keywords: extract_json_string(raw, "keywords"),
+        time_period: extract_json_string(raw, "time_period"),
+        atmosphere: extract_json_string(raw, "atmosphere"),
+        valence: extract_json_number(raw, "valence"),
+        salience: extract_json_number(raw, "salience"),
+        situation_strength: extract_json_number(raw, "situation_strength")
+            .and_then(|value| i32::try_from(value as i64).ok()),
+        evidence_notes: None,
+        continuation: extract_json_string(raw, "continuation"),
+    })
+}
+
+/// 按字段名抽取 JSON 字符串值（键名后的冒号与引号必须存在）。
+fn extract_json_string(raw: &str, key: &str) -> Option<String> {
+    let marker = format!("\"{key}\"");
+    let start = raw.find(&marker)? + marker.len();
+    let rest = raw[start..].trim_start().strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let mut output = String::new();
+    let mut chars = rest.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => match chars.next()? {
+                'n' => output.push('\n'),
+                't' => output.push('\t'),
+                'r' => output.push('\r'),
+                '"' => output.push('"'),
+                '\\' => output.push('\\'),
+                other => {
+                    output.push('\\');
+                    output.push(other);
+                }
+            },
+            '"' => return Some(output),
+            other => output.push(other),
+        }
+    }
+    None
+}
+
+/// 按字段名抽取 JSON 数值（允许数字被引号包裹）。
+fn extract_json_number(raw: &str, key: &str) -> Option<f64> {
+    let marker = format!("\"{key}\"");
+    let start = raw.find(&marker)? + marker.len();
+    let rest = raw[start..].trim_start().strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix('"').unwrap_or(rest);
+    let end = rest
+        .find(|ch: char| !(ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == '+'))
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 缺逗号的响应仍能按字段抽出摘要与数值。
+    #[test]
+    fn recovers_fields_without_commas() {
+        let raw = r#"{"summary": "测试摘要"
+"keywords": "甲, 乙"
+"valence": "0.5"
+"salience": 0.75
+"situation_strength": 4}"#;
+        let parsed = recover_summary_fields(raw).expect("应能抽取字段");
+        assert_eq!(parsed.summary.as_deref(), Some("测试摘要"));
+        assert_eq!(parsed.keywords.as_deref(), Some("甲, 乙"));
+        assert_eq!(parsed.valence, Some(0.5));
+        assert_eq!(parsed.salience, Some(0.75));
+        assert_eq!(parsed.situation_strength, Some(4));
+        assert!(parsed.evidence_notes.is_none());
+    }
+
+    /// 缺少 summary 时不降级。
+    #[test]
+    fn rejects_without_summary() {
+        assert!(recover_summary_fields(r#"{"keywords": "甲"}"#).is_none());
+        assert!(recover_summary_fields(r#"{"summary": "  "}"#).is_none());
+    }
 }

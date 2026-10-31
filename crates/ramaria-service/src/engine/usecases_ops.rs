@@ -9,6 +9,7 @@
 //! - 首次配置：密钥入 keychain → 后端配置落库 → provider 热替换 → 健康探测 → 状态机推进
 //! - API key 不经配置用例：密钥始终由 OS keychain 管理，配置结构本身不含密钥
 
+use std::path::Path;
 use std::sync::Arc;
 
 use ramaria_core::config::RamariaConfig;
@@ -52,6 +53,57 @@ impl Engine {
     /// - `force = true` 先清空全部旧块再全量重建（切分参数变更后必须使用）。
     pub async fn rebuild_utt_blocks(&self, force: bool) -> RamariaResult<UttRebuildOutcome> {
         crate::utt::rebuild(self, force).await
+    }
+}
+
+// =========================================================
+// 数据库快照用例
+// =========================================================
+
+impl Engine {
+    /// 创建数据库一致性快照（`VACUUM INTO`）。
+    ///
+    /// 参数:
+    /// - `target`: 快照文件路径；必须不存在，父目录由调用方创建。
+    ///
+    /// 返回:
+    /// - `Ok(())`: 目标文件为当前库的一致副本；
+    /// - `Validation`: 目标路径已存在；
+    /// - `Unsupported`: 引擎未附着连接池；
+    /// - `Storage`: SQLite 执行失败。
+    ///
+    /// 说明:
+    /// - 不关闭连接池、不删除源库、不改任何表：快照可与在线写入并存；
+    /// - 文件名位优先用参数绑定；不接受参数的 SQLite 版本回退为字面路径
+    ///   （路径内单引号按 SQL 规则双写）。
+    pub async fn snapshot_database(&self, target: &Path) -> RamariaResult<()> {
+        let Some(pool) = self.sqlite_pool() else {
+            return Err(RamariaError::unsupported(
+                "数据库快照需要 SQLite 连接池（Engine::attach_sqlite_pool）",
+            ));
+        };
+        // 目标已存在时 SQLite 只会报底层错误，先给出可读的边界错误
+        if target.exists() {
+            return Err(RamariaError::validation(format!(
+                "快照目标已存在: {}",
+                target.display()
+            )));
+        }
+
+        let path = target.to_string_lossy().into_owned();
+        if let Err(bind_err) = sqlx::query("VACUUM INTO ?")
+            .bind(&path)
+            .execute(&pool)
+            .await
+        {
+            tracing::debug!(error = %bind_err, "VACUUM INTO 参数位不可用，回退字面路径");
+            let escaped = path.replace('\'', "''");
+            sqlx::query(&format!("VACUUM INTO '{escaped}'"))
+                .execute(&pool)
+                .await
+                .map_err(|e| RamariaError::storage_with_source("创建数据库快照失败", e))?;
+        }
+        Ok(())
     }
 }
 

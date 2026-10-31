@@ -157,6 +157,7 @@ pub(in crate::chat) async fn step_resolve_session(
                     &input.channel,
                     input.conversation_id.as_deref(),
                     persona,
+                    None,
                 )
                 .await?;
                 Ok(ResolvedSession {

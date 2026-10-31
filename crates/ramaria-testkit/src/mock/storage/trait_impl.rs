@@ -39,6 +39,7 @@ impl StoreCrud for MockStorage {
     async fn delete_session_cascade(&self, _session_id: Uuid) -> RamariaResult<()> { self.delete_session_cascade(_session_id).await }
     async fn bind_session_persona_uid(&self, _session_id: Uuid, _persona_uid: &str) -> RamariaResult<()> { self.bind_session_persona_uid(_session_id, _persona_uid).await }
     async fn create_session_in_channel(&self, _persona_uid: Option<&str>, _channel: &str, _external_ref: Option<&str>) -> RamariaResult<Session> { self.create_session_in_channel(_persona_uid, _channel, _external_ref).await }
+    async fn create_session_in_channel_at(&self, _persona_uid: Option<&str>, _channel: &str, _external_ref: Option<&str>, _started_at: i64) -> RamariaResult<Session> { self.create_session_in_channel_at(_persona_uid, _channel, _external_ref, _started_at).await }
     async fn find_active_session_by_channel(&self, _channel: &str, _external_ref: Option<&str>) -> RamariaResult<Option<Session>> { self.find_active_session_by_channel(_channel, _external_ref).await }
     async fn close_session_if_active(&self, _session_id: Uuid) -> RamariaResult<bool> { self.close_session_if_active(_session_id).await }
     async fn upsert_session_members(&self, _members: &[SessionMember]) -> RamariaResult<()> { self.upsert_session_members(_members).await }

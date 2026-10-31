@@ -64,6 +64,23 @@ impl StoreCrud for SqliteStorage {
     ) -> RamariaResult<Session> {
         repo::sessions::create_in_channel(&self.pool, persona_uid, channel, external_ref).await
     }
+    /// 覆写为按给定开始时间写入（历史语料还原会话时间线）。
+    async fn create_session_in_channel_at(
+        &self,
+        persona_uid: Option<&str>,
+        channel: &str,
+        external_ref: Option<&str>,
+        started_at: i64,
+    ) -> RamariaResult<Session> {
+        repo::sessions::create_in_channel_at(
+            &self.pool,
+            persona_uid,
+            channel,
+            external_ref,
+            started_at,
+        )
+        .await
+    }
     async fn find_active_session_by_channel(
         &self,
         channel: &str,

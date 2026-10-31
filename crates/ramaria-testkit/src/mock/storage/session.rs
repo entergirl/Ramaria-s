@@ -121,6 +121,29 @@ impl MockStorage {
         Ok(session)
     }
 
+    pub(crate) async fn create_session_in_channel_at(
+        &self,
+        persona_uid: Option<&str>,
+        channel: &str,
+        external_ref: Option<&str>,
+        started_at: i64,
+    ) -> RamariaResult<Session> {
+        self.guard("create_session_in_channel_at")?;
+        let session = Session {
+            id: Uuid::new_v4(),
+            started_at,
+            ended_at: None,
+            persona_uid: persona_uid.map(str::to_string),
+            channel: channel.to_string(),
+            external_ref: external_ref.map(str::to_string),
+        };
+        self.sessions
+            .lock()
+            .expect("会话锁")
+            .insert(session.id, session.clone());
+        Ok(session)
+    }
+
     pub(crate) async fn find_active_session_by_channel(
         &self,
         channel: &str,

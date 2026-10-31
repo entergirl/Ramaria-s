@@ -2,9 +2,9 @@
 //!
 //! 设计特点:
 //! - 评测命令族的 clap 参数定义单独成文件，控制顶层定义文件规模
-//! - `corpus` 的二级动词（fetch / verify）在此展开，语料接入前即可解析
+//! - `corpus` 的二级动词（verify）在此展开，参数只表达类型与缺省
 //! - 沙盒后端来源与独立配置参数只对无子命令调用生效，取值域由 clap 收敛
-//! - 参数只表达类型与缺省，语义校验与文件存在性检查留给评测层
+//! - 语义校验（语言标签、语料名、文件存在性）留给评测层
 
 use std::path::PathBuf;
 
@@ -78,7 +78,7 @@ pub(crate) enum EvalCmd {
         output: Option<PathBuf>,
     },
 
-    /// 语料管理（fetch: 下载并校验 / verify: 校验本地副本）
+    /// 语料管理（verify: 校验本地副本）
     #[command(subcommand)]
     Corpus(CorpusCmd),
 
@@ -87,6 +87,14 @@ pub(crate) enum EvalCmd {
         /// 语料名（缺省用基线登记的主语料）
         #[arg(long)]
         corpus: Option<String>,
+
+        /// 规模与跨度档位
+        #[arg(long)]
+        tier: Option<String>,
+
+        /// 语料语言（zh / en）
+        #[arg(long)]
+        language: Option<String>,
 
         /// 产物输出路径
         #[arg(long)]
@@ -113,14 +121,13 @@ pub(crate) enum EvalCmd {
 /// 语料管理子命令。
 #[derive(Subcommand)]
 pub(crate) enum CorpusCmd {
-    /// 下载语料并校验哈希
-    Fetch {
-        /// 语料名（如 lifebench）
-        name: String,
-    },
     /// 校验本地语料的完整性
     Verify {
         /// 语料名（如 lifebench）
         name: String,
+
+        /// 语料语言（zh / en；留空校验注册表内全部文件）
+        #[arg(long)]
+        language: Option<String>,
     },
 }

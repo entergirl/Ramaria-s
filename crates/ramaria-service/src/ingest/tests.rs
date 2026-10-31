@@ -15,7 +15,7 @@ use crate::test_support::{
     L1_JSON_REPLY, MockLlm, engine_on_existing_db, engine_with_db, engine_with_l1_reply,
     seed_channel_session, seed_persona,
 };
-use crate::types::ChatRole;
+use crate::types::{ChatRole, TimedTurn};
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::traits::StoreCrud;
 
@@ -692,6 +692,138 @@ async fn ingest_skips_blank_content() {
 
     assert_eq!(outcome.written, 1);
     assert_eq!(outcome.deduplicated, 0);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 历史写入：消息时间原样落库，会话开始时间取首条消息时间。
+#[tokio::test]
+async fn ingest_historical_preserves_message_and_session_times() {
+    let (engine, storage, dir) = engine_with_db("ingest-historical").await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+
+    let first = 1_700_000_000_000i64;
+    let second = first + 5_000;
+    let outcome = engine
+        .ingest_historical(HistoricalIngestRequest {
+            messages: vec![
+                TimedTurn {
+                    role: ChatRole::User,
+                    content: "过去的第一句".to_string(),
+                    created_at: first,
+                },
+                TimedTurn {
+                    role: ChatRole::Assistant,
+                    content: "过去的回复".to_string(),
+                    created_at: second,
+                },
+            ],
+            persona: Some(DEFAULT_PERSONA_UID.to_string()),
+            conversation_id: Some("hist-A".to_string()),
+            channel: CHANNEL_MCP.to_string(),
+        })
+        .await
+        .expect("历史写入成功");
+
+    assert_eq!(outcome.written, 2);
+    assert!(!outcome.finalized, "历史写入不触发封存");
+
+    let messages = storage
+        .list_messages(outcome.session_id)
+        .await
+        .expect("查询消息成功");
+    let times: Vec<i64> = messages.iter().map(|m| m.created_at).collect();
+    assert_eq!(times, vec![first, second], "消息时间应原样保留");
+
+    let detail = engine
+        .session_detail(outcome.session_id, None, None)
+        .await
+        .expect("读取会话详情成功");
+    assert_eq!(
+        detail.started_at.timestamp_millis(),
+        first,
+        "会话开始时间应取首条消息时间"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 历史写入边界：空消息 / 非正时间 / 时间递减均显式报错，且不建会话。
+#[tokio::test]
+async fn ingest_historical_rejects_invalid_timestamps() {
+    let (engine, storage, dir) = engine_with_db("ingest-historical-bounds").await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+
+    let timed = |content: &str, created_at: i64| TimedTurn {
+        role: ChatRole::User,
+        content: content.to_string(),
+        created_at,
+    };
+    let cases = vec![
+        ("空消息", Vec::new()),
+        ("非正时间", vec![timed("你好", 0)]),
+        (
+            "时间递减",
+            vec![timed("第一句", 2_000), timed("第二句", 1_000)],
+        ),
+    ];
+    for (label, messages) in cases {
+        let err = engine
+            .ingest_historical(HistoricalIngestRequest {
+                messages,
+                persona: None,
+                conversation_id: Some("hist-bad".to_string()),
+                channel: CHANNEL_MCP.to_string(),
+            })
+            .await
+            .expect_err("非法历史请求应报错");
+        assert_eq!(err.category(), "validation", "{label} 应返回 Validation");
+    }
+
+    assert!(
+        storage
+            .list_sessions()
+            .await
+            .expect("查询会话成功")
+            .is_empty(),
+        "非法请求不得留下会话"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 在线回流路径未改：消息时间仍取写入时刻（相邻两条相差 0/1 ms）。
+#[tokio::test]
+async fn ingest_live_path_still_uses_now() {
+    let (engine, storage, dir) = engine_with_db("ingest-live-now").await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+
+    let before = now_ms();
+    let outcome = engine
+        .ingest(IngestRequest {
+            messages: vec![
+                turn(ChatRole::User, "第一句"),
+                turn(ChatRole::User, "第二句"),
+            ],
+            persona: None,
+            conversation_id: Some("live-A".to_string()),
+            channel: CHANNEL_MCP.to_string(),
+            finalize: false,
+        })
+        .await
+        .expect("回流成功");
+    let after = now_ms();
+
+    let messages = storage
+        .list_messages(outcome.session_id)
+        .await
+        .expect("查询消息成功");
+    let delta = messages[1].created_at - messages[0].created_at;
+    assert!((0..=1).contains(&delta), "在线路径按写入序号递增");
+    assert!(
+        messages[0].created_at >= before && messages[1].created_at <= after,
+        "在线路径应使用当前时间"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

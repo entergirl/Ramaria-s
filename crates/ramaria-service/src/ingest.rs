@@ -23,7 +23,10 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::engine::Engine;
-use crate::types::{CHANNEL_MCP, ChatTurn, DEFAULT_PERSONA_UID, IngestOutcome, IngestRequest};
+use crate::types::{
+    CHANNEL_MCP, ChatTurn, DEFAULT_PERSONA_UID, HistoricalIngestRequest, IngestOutcome,
+    IngestRequest,
+};
 
 /// 兜底通道：请求未带通道时归入 MCP 通道。
 fn normalize_channel(channel: &str) -> String {
@@ -62,6 +65,83 @@ fn normalize_external_ref(raw: Option<&str>) -> Option<String> {
 /// 返回:
 /// - `session_id`（消息落库目标会话）、`written`、`deduplicated`、`finalized`。
 pub(crate) async fn run(engine: &Engine, req: IngestRequest) -> RamariaResult<IngestOutcome> {
+    run_with_timestamps(engine, req, None).await
+}
+
+/// 执行历史写入用例（评测建库 / 历史回填）。
+///
+/// 与 [`run`] 的差异:
+/// - 每条消息按请求携带的 `created_at` 落库，会话开始时间取首条消息时间；
+/// - 空内容不静默跳过（否则消息 id 与评测标注的映射会错位），直接报错；
+/// - 无 `finalize`：历史建库由调用方显式封存。
+///
+/// 参数:
+/// - `engine`: 服务层引擎。
+/// - `req`: 历史写入请求（消息带显式时间，须按发生时间非递减）。
+///
+/// 返回:
+/// - 与回流写入同口径的结果（`finalized` 恒为 false）。
+pub(crate) async fn run_historical(
+    engine: &Engine,
+    req: HistoricalIngestRequest,
+) -> RamariaResult<IngestOutcome> {
+    if req.messages.is_empty() {
+        return Err(RamariaError::validation("历史消息不能为空"));
+    }
+
+    let mut messages = Vec::with_capacity(req.messages.len());
+    let mut timestamps = Vec::with_capacity(req.messages.len());
+    let mut prev_created_at: Option<i64> = None;
+    for (index, turn) in req.messages.iter().enumerate() {
+        if turn.created_at <= 0 {
+            return Err(RamariaError::validation(format!(
+                "历史消息第 {index} 条 created_at 必须为正的 Unix 毫秒（当前 {}）",
+                turn.created_at
+            )));
+        }
+        if turn.content.trim().is_empty() {
+            return Err(RamariaError::validation(format!(
+                "历史消息第 {index} 条内容为空（历史写入不允许跳过）"
+            )));
+        }
+        if let Some(prev) = prev_created_at.filter(|prev| turn.created_at < *prev) {
+            return Err(RamariaError::validation(format!(
+                "历史消息第 {index} 条时间 {} 早于前一条 {prev}（须非递减）",
+                turn.created_at
+            )));
+        }
+        prev_created_at = Some(turn.created_at);
+        timestamps.push(turn.created_at);
+        messages.push(ChatTurn {
+            role: turn.role,
+            content: turn.content.clone(),
+        });
+    }
+
+    run_with_timestamps(
+        engine,
+        IngestRequest {
+            messages,
+            persona: req.persona,
+            conversation_id: req.conversation_id,
+            channel: req.channel,
+            finalize: false,
+        },
+        Some(timestamps),
+    )
+    .await
+}
+
+/// 回流写入的共用实现（`timestamps` 与消息逐条对齐由调用方保证）。
+///
+/// 参数:
+/// - `timestamps`: `Some` 时按索引取消息时间、首条时间作为会话开始时间；
+///   `None` 时按写入时刻加序号生成消息时间（在线回流口径）。
+async fn run_with_timestamps(
+    engine: &Engine,
+    req: IngestRequest,
+    timestamps: Option<Vec<i64>>,
+) -> RamariaResult<IngestOutcome> {
     if req.messages.is_empty() {
         return Err(RamariaError::validation("messages 不能为空"));
     }
@@ -100,7 +180,15 @@ pub(crate) async fn run(engine: &Engine, req: IngestRequest) -> RamariaResult<In
     let storage = engine.storage_ref().as_ref();
 
     // ---- 1. 会话解析（含惰性封存体检） ----
-    let session = resolve_session(engine, &channel, external_ref.as_deref(), &persona).await?;
+    let session_started_at = timestamps.as_ref().and_then(|ts| ts.first().copied());
+    let session = resolve_session(
+        engine,
+        &channel,
+        external_ref.as_deref(),
+        &persona,
+        session_started_at,
+    )
+    .await?;
 
     // ---- 2. 重发前缀跳过 + 指纹去重 + 落库 ----
     // 去重依据 = 该对话**全部**消息键（跨会话、仅 role + trim 正文两列）：
@@ -164,7 +252,11 @@ pub(crate) async fn run(engine: &Engine, req: IngestRequest) -> RamariaResult<In
             MessageSource::Local,
         )
         .with_persona_uid(Some(persona.clone()));
-        message.created_at = base_ts.saturating_add(index as i64);
+        // 历史写入按请求时间还原时间线；在线路径保持"写入时刻 + 序号"（会话内顺序稳定）
+        message.created_at = match timestamps.as_deref() {
+            Some(ts) => ts.get(index).copied().unwrap_or(base_ts),
+            None => base_ts.saturating_add(index as i64),
+        };
         message.fingerprint = Some(fingerprint);
 
         storage.save_message(&message).await?;
@@ -236,11 +328,13 @@ pub(crate) async fn run(engine: &Engine, req: IngestRequest) -> RamariaResult<In
 /// - `channel`: 来源通道。
 /// - `external_ref`: 外部对话标识（None = 单流退化）。
 /// - `persona`: 归属人格。
+/// - `session_started_at`: 新建会话的开始时间（历史写入用；None = 当前时间）。
 pub(crate) async fn resolve_session(
     engine: &Engine,
     channel: &str,
     external_ref: Option<&str>,
     persona: &str,
+    session_started_at: Option<i64>,
 ) -> RamariaResult<Session> {
     let storage = engine.storage_ref().as_ref();
 
@@ -294,9 +388,18 @@ pub(crate) async fn resolve_session(
         }
     }
 
-    let session = storage
-        .create_session_in_channel(Some(persona), channel, external_ref)
-        .await?;
+    let session = match session_started_at {
+        Some(started_at) => {
+            storage
+                .create_session_in_channel_at(Some(persona), channel, external_ref, started_at)
+                .await?
+        }
+        None => {
+            storage
+                .create_session_in_channel(Some(persona), channel, external_ref)
+                .await?
+        }
+    };
     tracing::info!(
         session_id = %session.id,
         channel,

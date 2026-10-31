@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - dev-only：不随安装包发布；产品能力层（core / service 等）不依赖本 crate，仅 CLI 入口接入
 //! - 依赖面仅 core / service：需要存储或检索句柄时经服务层取用
-//! - 按统计、测量、命令、沙盒、界面五域分模块，统计与测量为纯计算零 I/O
+//! - 按统计、测量、命令、语料、沙盒、界面六域分模块，统计与测量为纯计算零 I/O
 //! - 命令层只做参数承载与结果返回，无子命令进入沙盒界面（TTY 为 TUI，非 TTY 为行模式）
 //! - 评测装配使用独立配置快照、不拉起后台循环
 //! - 评测只写评测根下的库与产物，不触碰用户库
@@ -11,13 +11,16 @@
 use std::path::PathBuf;
 
 pub mod assembly;
+pub mod baseline;
 pub mod command;
+pub mod corpus;
 pub mod measure;
 pub mod sandbox;
 pub mod stats;
 pub mod tui;
 
 pub use assembly::{EVAL_CONFIG_FILE, EVAL_DB_FILE, open_engine, write_config_snapshot};
+pub use baseline::{BaselineArtifact, BaselineReport};
 pub use command::{EvalCommand, run};
 pub use sandbox::{
     SandboxBackendChoice, SandboxBackendMode, SandboxInput, SandboxModelKind, SandboxOptions,

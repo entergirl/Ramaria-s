@@ -40,14 +40,19 @@ pub(crate) fn eval_command(args: &EvalArgs) -> Option<EvalCommand> {
             matrix: matrix.clone(),
             output: output.clone(),
         },
-        EvalCmd::Corpus(CorpusCmd::Fetch { name }) => {
-            EvalCommand::CorpusFetch { name: name.clone() }
-        }
-        EvalCmd::Corpus(CorpusCmd::Verify { name }) => {
-            EvalCommand::CorpusVerify { name: name.clone() }
-        }
-        EvalCmd::Baseline { corpus, output } => EvalCommand::Baseline {
+        EvalCmd::Corpus(CorpusCmd::Verify { name, language }) => EvalCommand::CorpusVerify {
+            name: name.clone(),
+            language: language.clone(),
+        },
+        EvalCmd::Baseline {
+            corpus,
+            tier,
+            language,
+            output,
+        } => EvalCommand::Baseline {
             corpus: corpus.clone(),
+            tier: tier.clone(),
+            language: language.clone(),
             output: output.clone(),
         },
         EvalCmd::Score { run_id } => EvalCommand::Score {
@@ -622,6 +627,22 @@ mod tests {
                 model_id: "model-a".to_string(),
                 embedding_model_path: Some(PathBuf::from("models/bge")),
             }
+        );
+    }
+
+    /// 语料校验参数原样映射到评测层命令。
+    #[test]
+    fn eval_command_maps_corpus_verify() {
+        let eval = args(Some(EvalCmd::Corpus(CorpusCmd::Verify {
+            name: "lifebench".to_string(),
+            language: Some("zh".to_string()),
+        })));
+        assert_eq!(
+            eval_command(&eval),
+            Some(EvalCommand::CorpusVerify {
+                name: "lifebench".to_string(),
+                language: Some("zh".to_string()),
+            })
         );
     }
 

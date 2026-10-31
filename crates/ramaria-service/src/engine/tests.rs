@@ -473,3 +473,69 @@ async fn attach_sqlite_pool_roundtrip() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// =========================================================
+// 数据库快照
+// =========================================================
+
+/// 快照副本可独立打开并读到一致数据（原库连接关闭后仍可读）。
+#[tokio::test]
+async fn snapshot_database_copies_readable_state() {
+    let (engine, storage, dir) = crate::test_support::engine_with_db("snapshot").await;
+    crate::test_support::seed_persona(&storage, crate::types::DEFAULT_PERSONA_UID).await;
+    let written = engine
+        .ingest(IngestRequest {
+            messages: vec![crate::types::ChatTurn {
+                role: crate::types::ChatRole::User,
+                content: "快照前的一条消息".to_string(),
+            }],
+            persona: None,
+            conversation_id: Some("snap-1".to_string()),
+            channel: crate::types::CHANNEL_MCP.to_string(),
+            finalize: false,
+        })
+        .await
+        .expect("回流写入成功");
+
+    let snapshot = dir.join("snapshot.db");
+    engine
+        .snapshot_database(&snapshot)
+        .await
+        .expect("快照应成功");
+    assert!(snapshot.exists(), "快照文件应生成");
+
+    // 关闭原库连接后再打开副本：证明副本自包含，不依赖源库句柄
+    if let Some(pool) = engine.sqlite_pool() {
+        pool.close().await;
+    }
+    drop(engine);
+    drop(storage);
+
+    let copy = Engine::open(snapshot).await.expect("快照库装配应成功");
+    let messages = copy
+        .storage()
+        .list_messages(written.session_id)
+        .await
+        .expect("查询消息成功");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].content, "快照前的一条消息");
+    drop(copy);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 目标路径已存在时返回 Validation，不覆盖也不落到 SQLite 底层错误。
+#[tokio::test]
+async fn snapshot_database_rejects_existing_target() {
+    let (engine, _storage, dir) = crate::test_support::engine_with_db("snapshot-exists").await;
+    let target = dir.join("exists.db");
+    std::fs::write(&target, b"occupied").expect("写入占位文件应成功");
+
+    let err = engine
+        .snapshot_database(&target)
+        .await
+        .expect_err("目标已存在应报错");
+    assert_eq!(err.category(), "validation");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

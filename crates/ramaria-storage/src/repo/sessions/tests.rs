@@ -514,3 +514,30 @@ async fn list_closed_missing_l1_filters_and_limits() {
         .expect("limit 查询应成功");
     assert_eq!(limited, vec![hit_early.id], "limit=1 取最早一条");
 }
+
+/// 指定开始时间创建通道会话：时间原样落库；原入口仍取当前时间。
+#[tokio::test]
+async fn create_in_channel_at_roundtrip() {
+    let pool = init_test_pool().await.expect("测试库初始化成功");
+
+    let started_at = 1_600_000_000_000i64;
+    let session = create_in_channel_at(&pool, Some("rama-0001"), "mcp", Some("hist-A"), started_at)
+        .await
+        .expect("创建带时间 session 成功");
+    assert_eq!(session.started_at, started_at);
+    assert_eq!(session.channel, "mcp");
+    assert_eq!(session.external_ref.as_deref(), Some("hist-A"));
+
+    let fetched = get(&pool, session.id)
+        .await
+        .expect("查询成功")
+        .expect("session 应存在");
+    assert_eq!(fetched.started_at, started_at, "开始时间应原样回读");
+
+    // 原入口行为不变：开始时间取当前时刻
+    let before = ramaria_core::types::now_ms();
+    let live = create_in_channel(&pool, Some("rama-0001"), "mcp", Some("live-A"))
+        .await
+        .expect("创建带通道 session 成功");
+    assert!(live.started_at >= before, "未指定时间的创建仍取当前时间");
+}

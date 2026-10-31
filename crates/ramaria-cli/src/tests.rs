@@ -195,14 +195,76 @@ fn eval_subcommands_parse() {
         _ => panic!("应解析为 Eval::Run，实际解析为其他命令"),
     }
 
-    let cli = Cli::try_parse_from(["ramaria", "eval", "corpus", "fetch", "lifebench"])
-        .expect("eval corpus fetch 应可解析");
+    let cli = Cli::try_parse_from([
+        "ramaria",
+        "eval",
+        "corpus",
+        "verify",
+        "lifebench",
+        "--language",
+        "zh",
+    ])
+    .expect("eval corpus verify 应可解析");
     match cli.command {
         Commands::Eval(EvalArgs {
-            command: Some(EvalCmd::Corpus(CorpusCmd::Fetch { name })),
+            command: Some(EvalCmd::Corpus(CorpusCmd::Verify { name, language })),
             ..
-        }) => assert_eq!(name, "lifebench"),
-        _ => panic!("应解析为 Eval::Corpus::Fetch，实际解析为其他命令"),
+        }) => {
+            assert_eq!(name, "lifebench");
+            assert_eq!(language.as_deref(), Some("zh"));
+        }
+        _ => panic!("应解析为 Eval::Corpus::Verify，实际解析为其他命令"),
+    }
+
+    let cli = Cli::try_parse_from(["ramaria", "eval", "corpus", "verify", "lifebench"])
+        .expect("不带 --language 的 verify 应可解析");
+    match cli.command {
+        Commands::Eval(EvalArgs {
+            command: Some(EvalCmd::Corpus(CorpusCmd::Verify { name, language })),
+            ..
+        }) => {
+            assert_eq!(name, "lifebench");
+            assert!(language.is_none(), "未给 --language 时校验全部语言");
+        }
+        _ => panic!("应解析为 Eval::Corpus::Verify，实际解析为其他命令"),
+    }
+
+    assert!(
+        Cli::try_parse_from(["ramaria", "eval", "corpus", "fetch", "lifebench"]).is_err(),
+        "corpus fetch 已移除"
+    );
+
+    let cli = Cli::try_parse_from([
+        "ramaria",
+        "eval",
+        "baseline",
+        "--corpus",
+        "lifebench",
+        "--tier",
+        "u1-y1",
+        "--language",
+        "en",
+        "--output",
+        "out/base",
+    ])
+    .expect("eval baseline 应可解析");
+    match cli.command {
+        Commands::Eval(EvalArgs {
+            command:
+                Some(EvalCmd::Baseline {
+                    corpus,
+                    tier,
+                    language,
+                    output,
+                }),
+            ..
+        }) => {
+            assert_eq!(corpus.as_deref(), Some("lifebench"));
+            assert_eq!(tier.as_deref(), Some("u1-y1"));
+            assert_eq!(language.as_deref(), Some("en"));
+            assert_eq!(output, Some(PathBuf::from("out/base")));
+        }
+        _ => panic!("应解析为 Eval::Baseline，实际解析为其他命令"),
     }
 
     let cli =

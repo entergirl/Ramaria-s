@@ -28,10 +28,12 @@ pub(super) struct L1SummaryResponse {
     pub(super) keywords: Option<String>,
     pub(super) time_period: Option<String>,
     pub(super) atmosphere: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_f64")]
     pub(super) valence: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_f64")]
     pub(super) salience: Option<f64>,
     /// 情境强度 1-5，None 时按默认值 3 处理
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_i32")]
     pub(super) situation_strength: Option<i32>,
     /// 证据线索列表（宽容解析：对象数组 / 旧字符串数组 / 缺失）
     #[serde(default, deserialize_with = "deserialize_evidence_notes")]
@@ -40,6 +42,49 @@ pub(super) struct L1SummaryResponse {
     /// 无上一块时 prompt 不含该字段，LLM 不会输出 → None。
     #[serde(default)]
     pub(super) continuation: Option<String>,
+}
+
+// =========================================================
+// 数值字段宽容反序列化
+// =========================================================
+
+/// 宽容反序列化可选浮点数：接受 JSON number 与数字字符串。
+///
+/// 说明:
+/// - 本地模型常把 `0.5` 写成 `"0.5"`，严格 `f64` 会整段解析失败；
+/// - 无法解析的字符串按缺失处理，由校验阶段填默认值；
+/// - 非数字 / 非字符串类型返回反序列化错误。
+fn deserialize_optional_f64<'de, D>(deserializer: D) -> std::result::Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(number)) => Ok(number.as_f64()),
+        Some(serde_json::Value::String(text)) => Ok(text.trim().parse().ok()),
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "数值字段类型非法: {other}"
+        ))),
+    }
+}
+
+/// 宽容反序列化可选整数：接受 JSON number 与数字字符串。
+fn deserialize_optional_i32<'de, D>(deserializer: D) -> std::result::Result<Option<i32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(number)) => {
+            Ok(number.as_i64().and_then(|value| i32::try_from(value).ok()))
+        }
+        Some(serde_json::Value::String(text)) => Ok(text.trim().parse().ok()),
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "整数字段类型非法: {other}"
+        ))),
+    }
 }
 
 // =========================================================
@@ -89,4 +134,31 @@ where
         }
     }
     Ok(Some(notes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 本地模型把数值写成字符串时仍可解析（校验阶段再钳制）。
+    #[test]
+    fn numeric_strings_are_accepted() {
+        let parsed: L1SummaryResponse = serde_json::from_str(
+            r#"{"summary":"测试","valence":"0.5","salience":"0.7","situation_strength":"4"}"#,
+        )
+        .expect("数值字符串应可解析");
+        assert_eq!(parsed.valence, Some(0.5));
+        assert_eq!(parsed.salience, Some(0.7));
+        assert_eq!(parsed.situation_strength, Some(4));
+    }
+
+    /// 非法数字字符串按缺失处理，不阻塞整段解析。
+    #[test]
+    fn invalid_numeric_strings_fall_back_to_none() {
+        let parsed: L1SummaryResponse =
+            serde_json::from_str(r#"{"summary":"测试","valence":"高","salience":null}"#)
+                .expect("非法数值字符串应按缺失处理");
+        assert_eq!(parsed.valence, None);
+        assert_eq!(parsed.salience, None);
+    }
 }

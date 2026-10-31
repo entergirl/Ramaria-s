@@ -12,9 +12,13 @@ workspace = true
 [dependencies]
 ramaria-core = { path = "../ramaria-core" }
 ramaria-service = { path = "../ramaria-service" }
+chrono.workspace = true
 crossterm = { version = "0.28", features = ["event-stream"] }
 futures.workspace = true
 ratatui = "0.29"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true

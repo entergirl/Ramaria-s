@@ -17,7 +17,10 @@ use uuid::Uuid;
 
 mod channel;
 
-pub use channel::{ChannelOverview, channel_overview, create_in_channel, find_active_by_channel};
+pub use channel::{
+    ChannelOverview, channel_overview, create_in_channel, create_in_channel_at,
+    find_active_by_channel,
+};
 
 /// 列表中查询会话的列清单（与 [`SessionRow`] 字段顺序一致）。
 const SESSION_COLUMNS: &str = "id, started_at, ended_at, persona_uid, channel, external_ref";

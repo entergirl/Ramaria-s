@@ -1,9 +1,10 @@
-//! crates/ramaria-eval/src/command.rs - 评测命令与占位执行
+//! crates/ramaria-eval/src/command.rs - 评测命令与执行分发
 //!
 //! 设计特点:
 //! - 命令枚举只承载参数，不持有引擎与宿主句柄
-//! - 无参进入沙盒界面（TTY 为 TUI，非 TTY 为行模式），子命令未实现时返回 unsupported
-//! - 异步实现：沙盒读写库与标准输入都需要运行时
+//! - 无参进入沙盒界面（TTY 为 TUI，非 TTY 为行模式）
+//! - 语料校验与基线建库已落地，报告与产物摘要直出标准输出
+//! - 未实现子命令统一返回 unsupported，文案带子命令名
 //! - 错误走 core 结构化错误，由入口层统一映射 exit code
 
 use std::path::PathBuf;
@@ -24,20 +25,21 @@ pub enum EvalCommand {
         /// 产物输出路径
         output: Option<PathBuf>,
     },
-    /// 下载语料并校验哈希
-    CorpusFetch {
-        /// 语料名
-        name: String,
-    },
     /// 校验本地语料完整性
     CorpusVerify {
         /// 语料名
         name: String,
+        /// 语言标签（zh / en；缺省校验注册表内全部文件）
+        language: Option<String>,
     },
     /// 生成基线库与指纹
     Baseline {
         /// 语料名
         corpus: Option<String>,
+        /// 规模与跨度档位
+        tier: Option<String>,
+        /// 语言标签（zh / en）
+        language: Option<String>,
         /// 产物输出路径
         output: Option<PathBuf>,
     },
@@ -60,7 +62,6 @@ impl EvalCommand {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Run { .. } => "run",
-            Self::CorpusFetch { .. } => "corpus fetch",
             Self::CorpusVerify { .. } => "corpus verify",
             Self::Baseline { .. } => "baseline",
             Self::Score { .. } => "score",
@@ -77,10 +78,25 @@ impl EvalCommand {
 ///
 /// 返回:
 /// - 无参：TTY 下进入沙盒界面，非 TTY 读取标准输入并运行沙盒（报告写标准输出）；
-/// - 子命令：`Unsupported`（尚未实现）。
+/// - `corpus verify`：校验通过时报告写标准输出，失败返回结构化错误；
+/// - `baseline`：逐档建库并导出产物，摘要写标准输出；
+/// - 其余子命令：`Unsupported`（尚未实现）。
 pub async fn run(command: Option<EvalCommand>, context: EvalContext) -> RamariaResult<()> {
     match command {
         None => crate::tui::run(context.user_db, context.backend).await,
+        Some(EvalCommand::CorpusVerify { name, language }) => {
+            crate::corpus::verify_command(&name, language.as_deref())
+        }
+        Some(EvalCommand::Baseline {
+            corpus,
+            tier,
+            language,
+            output,
+        }) => {
+            let report = crate::baseline::run(corpus, tier, language, output).await?;
+            println!("{}", report.render());
+            Ok(())
+        }
         Some(command) => Err(RamariaError::unsupported(format!(
             "eval {} 尚未实现",
             command.name()
@@ -92,12 +108,12 @@ pub async fn run(command: Option<EvalCommand>, context: EvalContext) -> RamariaR
 mod tests {
     use super::*;
 
-    /// 子命令统一返回 unsupported，文案带子命令名。
+    /// 未实现的子命令返回 unsupported，文案带子命令名。
     #[tokio::test]
     async fn run_with_command_reports_unsupported() {
         let err = run(
-            Some(EvalCommand::CorpusFetch {
-                name: "lifebench".into(),
+            Some(EvalCommand::Score {
+                run_id: "run-1".into(),
             }),
             EvalContext::default(),
         )
@@ -108,8 +124,52 @@ mod tests {
             "应为 unsupported，实际 {err:?}"
         );
         assert!(
-            err.to_string().contains("corpus fetch"),
+            err.to_string().contains("score"),
             "文案应含子命令名，实际 {err}"
+        );
+    }
+
+    /// 未知语料在校验前即报错，不触碰文件系统。
+    #[tokio::test]
+    async fn corpus_verify_rejects_unknown_corpus() {
+        let err = run(
+            Some(EvalCommand::CorpusVerify {
+                name: "nope".into(),
+                language: None,
+            }),
+            EvalContext::default(),
+        )
+        .await
+        .expect_err("未知语料应报错");
+        assert!(
+            matches!(&err, RamariaError::Validation { .. }),
+            "应为 Validation，实际 {err:?}"
+        );
+        assert!(
+            err.to_string().contains("未知语料"),
+            "文案应含未知语料，实际 {err}"
+        );
+    }
+
+    /// 语言标签非法时在读取文件前失败。
+    #[tokio::test]
+    async fn corpus_verify_rejects_unknown_language() {
+        let err = run(
+            Some(EvalCommand::CorpusVerify {
+                name: "lifebench".into(),
+                language: Some("fr".into()),
+            }),
+            EvalContext::default(),
+        )
+        .await
+        .expect_err("非法语言应报错");
+        assert!(
+            matches!(&err, RamariaError::Validation { .. }),
+            "应为 Validation，实际 {err:?}"
+        );
+        assert!(
+            err.to_string().contains("未知语料语言"),
+            "文案应含语言取值，实际 {err}"
         );
     }
 
@@ -126,16 +186,17 @@ mod tests {
                 "run",
             ),
             (
-                EvalCommand::CorpusFetch { name: "x".into() },
-                "corpus fetch",
-            ),
-            (
-                EvalCommand::CorpusVerify { name: "x".into() },
+                EvalCommand::CorpusVerify {
+                    name: "x".into(),
+                    language: None,
+                },
                 "corpus verify",
             ),
             (
                 EvalCommand::Baseline {
                     corpus: None,
+                    tier: None,
+                    language: None,
                     output: None,
                 },
                 "baseline",

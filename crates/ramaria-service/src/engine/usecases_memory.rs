@@ -19,9 +19,9 @@ use crate::proactive::{ProactiveDirective, ProactiveOutcome};
 use crate::stream_event::ChatStreamHandle;
 use crate::types::{
     CascadeOutcome, CascadeUntil, ChannelImageOutcome, ChatSendOutcome, ChatSendRequest,
-    ChatStreamRequest, HistoryRequest, HistoryResult, IngestOutcome, IngestRequest,
-    LocalImageSendOutcome, LocalImageSendRequest, RecallRequest, RecallResult, RecallWithTrace,
-    SealOutcome,
+    ChatStreamRequest, HistoricalIngestRequest, HistoryRequest, HistoryResult, IngestOutcome,
+    IngestRequest, LocalImageSendOutcome, LocalImageSendRequest, RecallRequest, RecallResult,
+    RecallWithTrace, SealOutcome,
 };
 
 use super::Engine;
@@ -111,6 +111,22 @@ impl Engine {
     /// - 成功时返回 `session_id` / `written` / `deduplicated` / `finalized`。
     pub async fn ingest(&self, req: IngestRequest) -> RamariaResult<IngestOutcome> {
         crate::ingest::run(self, req).await
+    }
+
+    /// 历史写入用例：把带显式时间的语料回流入库（评测建库 / 历史回填）。
+    ///
+    /// 职责:
+    /// - 与 [`Engine::ingest`] 共用会话解析 / 去重 / 落库实现，差异仅在消息时间取
+    ///   请求值、会话开始时间取首条消息时间；
+    /// - 不触发封存：历史建库由调用方在写完后显式 [`Engine::seal`]。
+    ///
+    /// 返回:
+    /// - 成功时返回 `session_id` / `written` / `deduplicated`（`finalized` 恒为 false）。
+    pub async fn ingest_historical(
+        &self,
+        req: HistoricalIngestRequest,
+    ) -> RamariaResult<IngestOutcome> {
+        crate::ingest::run_historical(self, req).await
     }
 
     /// 封存用例：抢占式关闭会话并触发封存链路（L1 → 索引镜像 → utt → examples → 钩子）。

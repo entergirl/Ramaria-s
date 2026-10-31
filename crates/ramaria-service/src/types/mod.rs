@@ -40,7 +40,7 @@ pub use facts::{
     FactBrowsePage, FactBrowseRequest, FactDetailView, FactEntryView, GroupedFactsView,
 };
 pub use index::{IndexProgress, IndexRebuildReceipt, IndexStatusView};
-pub use ingest::{IngestOutcome, IngestRequest};
+pub use ingest::{HistoricalIngestRequest, IngestOutcome, IngestRequest, TimedTurn};
 pub use keyword::{
     AliasAction, AliasResolveOutcome, AliasResolveRequest, KeywordEntryView, KeywordPoolView,
     KeywordSeedItem, KeywordSeedOutcome, KeywordSuggestionOutcome, PendingAliasView,

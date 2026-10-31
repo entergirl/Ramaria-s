@@ -22,13 +22,36 @@ use super::SessionRow;
 /// - `persona_uid`: 对话人格标识。
 /// - `channel`: 来源通道（如 `mcp`）。
 /// - `external_ref`: 外部对话标识（客户端 conversation id / 客户端名）。
+///
+/// 说明:
+/// - 开始时间取当前时间；历史语料按首条消息时间建会话时用 [`create_in_channel_at`]。
 pub async fn create_in_channel(
     pool: &SqlitePool,
     persona_uid: Option<&str>,
     channel: &str,
     external_ref: Option<&str>,
 ) -> RamariaResult<Session> {
-    let now = ramaria_core::types::now_ms();
+    create_in_channel_at(
+        pool,
+        persona_uid,
+        channel,
+        external_ref,
+        ramaria_core::types::now_ms(),
+    )
+    .await
+}
+
+/// 创建带来源通道且指定开始时间的 session（历史写入专用）。
+///
+/// 参数:
+/// - `started_at`: 会话开始时间（Unix 毫秒，由调用方按历史语料给出）。
+pub async fn create_in_channel_at(
+    pool: &SqlitePool,
+    persona_uid: Option<&str>,
+    channel: &str,
+    external_ref: Option<&str>,
+    started_at: i64,
+) -> RamariaResult<Session> {
     let id = Uuid::new_v4();
     // 多进程写锁争用时有限重试，避免 database is locked 直接失败
     with_busy_retry("创建带通道 session", || async {
@@ -37,7 +60,7 @@ pub async fn create_in_channel(
              VALUES (?, ?, ?, ?, ?)",
         )
         .bind(id.to_string())
-        .bind(now)
+        .bind(started_at)
         .bind(persona_uid)
         .bind(channel)
         .bind(external_ref)
@@ -48,7 +71,7 @@ pub async fn create_in_channel(
     .storage_err("创建带通道 session 失败")?;
     Ok(Session {
         id,
-        started_at: now,
+        started_at,
         ended_at: None,
         persona_uid: persona_uid.map(|s| s.to_string()),
         channel: channel.to_string(),
