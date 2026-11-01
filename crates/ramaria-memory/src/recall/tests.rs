@@ -10,7 +10,7 @@ use crate::retriever::{L1DocView, L2DocView, Retriever, UttDocView};
 use crate::trace::{DropReason, RecallTrace, TraceChannel};
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::traits::StorageBackend;
-use ramaria_core::types::PersonaKind;
+use ramaria_core::types::{MemoryL1, Persona, PersonaKind};
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
@@ -71,6 +71,7 @@ async fn hit_assembles_context_and_hits() {
         },
         memory_layers: RecallMemoryLayers::default(),
         now_ms: 2_000,
+        as_of_ms: None,
     })
     .await;
 
@@ -106,6 +107,7 @@ async fn gates_closed_returns_empty() {
         },
         memory_layers: RecallMemoryLayers::default(),
         now_ms: 2_000,
+        as_of_ms: None,
     })
     .await;
 
@@ -139,6 +141,7 @@ async fn unloaded_slot_returns_empty() {
         },
         memory_layers: RecallMemoryLayers::default(),
         now_ms: 2_000,
+        as_of_ms: None,
     })
     .await;
 
@@ -166,6 +169,7 @@ async fn persona_filter_hides_low_share_event() {
             confidence: 0.9,
             created_at: 1_000,
             start: 1_000,
+            end: 1_000,
             salience: 0.8,
         });
     }
@@ -187,6 +191,7 @@ async fn persona_filter_hides_low_share_event() {
         },
         memory_layers: RecallMemoryLayers::default(),
         now_ms: 2_000,
+        as_of_ms: None,
     })
     .await;
 
@@ -225,6 +230,7 @@ async fn memory_layer_switch_filters_sublayers() {
             confidence: 0.9,
             created_at: 1_000,
             start: 1_000,
+            end: 1_000,
             salience: 0.8,
         });
     }
@@ -251,6 +257,7 @@ async fn memory_layer_switch_filters_sublayers() {
                 },
                 memory_layers: layers,
                 now_ms: 2_000,
+                as_of_ms: None,
             })
             .await
         }
@@ -330,6 +337,7 @@ async fn utt_respects_persona_whitelist() {
         },
         memory_layers: RecallMemoryLayers::default(),
         now_ms: 2_000,
+        as_of_ms: None,
     })
     .await;
     assert!(output.utt_context.is_some(), "白名单内应注入原文片段");
@@ -352,6 +360,7 @@ async fn utt_respects_persona_whitelist() {
         },
         memory_layers: RecallMemoryLayers::default(),
         now_ms: 2_000,
+        as_of_ms: None,
     })
     .await;
     assert!(output.utt_context.is_none(), "白名单外不注入原文");
@@ -399,6 +408,7 @@ async fn utt_whitelist_follows_persona_kind_not_uid_prefix() {
                 },
                 memory_layers: RecallMemoryLayers::default(),
                 now_ms: 2_000,
+                as_of_ms: None,
             })
             .await
         }
@@ -439,6 +449,7 @@ async fn rag_threshold_follows_persona_kind() {
             confidence: 0.9,
             created_at: 1_000,
             start: 1_000,
+            end: 1_000,
             salience: 0.8,
         });
     }
@@ -465,6 +476,7 @@ async fn rag_threshold_follows_persona_kind() {
                 },
                 memory_layers: RecallMemoryLayers::default(),
                 now_ms: 2_000,
+                as_of_ms: None,
             })
             .await
         }
@@ -511,6 +523,7 @@ async fn keyword_mirror_empty_degrades_silently() {
         },
         memory_layers: RecallMemoryLayers::default(),
         now_ms: 2_000,
+        as_of_ms: None,
     })
     .await;
 
@@ -561,6 +574,7 @@ async fn both_handles_produce_identical_output() {
         },
         memory_layers: RecallMemoryLayers::default(),
         now_ms: 2_000,
+        as_of_ms: None,
     })
     .await;
 
@@ -581,6 +595,7 @@ async fn both_handles_produce_identical_output() {
         },
         memory_layers: RecallMemoryLayers::default(),
         now_ms: 2_000,
+        as_of_ms: None,
     })
     .await;
 
@@ -651,6 +666,7 @@ async fn trace_keeps_output_identical() {
         },
         memory_layers: RecallMemoryLayers::default(),
         now_ms: 2_000,
+        as_of_ms: None,
     })
     .await;
 
@@ -673,9 +689,11 @@ async fn trace_keeps_output_identical() {
             },
             memory_layers: RecallMemoryLayers::default(),
             now_ms: 2_000,
+            as_of_ms: None,
         },
         RecallOptions {
             trace: Some(&mut trace),
+            touch: true,
         },
     )
     .await;
@@ -691,6 +709,14 @@ async fn trace_keeps_output_identical() {
     assert_eq!(trace.query_chars, 4, "只记查询字符数，不记文本");
     assert!(!trace.retrieval.fused.is_empty(), "轨迹应含融合条目");
     assert!(!trace.utt.active, "utt 闸门关闭时通道未生效");
+    assert!(
+        trace
+            .retrieval
+            .dropped
+            .iter()
+            .all(|d| d.reason != DropReason::Future),
+        "查询时钟缺省时不应产生未来剔除"
+    );
 }
 
 /// 轨迹内容：通道候选、衰减回填、条数预算丢弃与预算计数。
@@ -721,9 +747,11 @@ async fn trace_records_channels_decay_and_budget() {
             },
             memory_layers: RecallMemoryLayers::default(),
             now_ms: 2_000,
+            as_of_ms: None,
         },
         RecallOptions {
             trace: Some(&mut trace),
+            touch: true,
         },
     )
     .await;
@@ -759,6 +787,159 @@ async fn trace_records_channels_decay_and_budget() {
     assert_eq!(trace.budget.kept, 1);
 }
 
+// =========================================================
+// 查询时钟（as_of）
+// =========================================================
+
+/// 一天毫秒数（查询时钟用例的时间刻度）。
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// 未来过滤：事件结束时间晚于查询时钟时，该事件在融合前被剔除并记入轨迹。
+#[tokio::test]
+async fn future_units_dropped_before_fusion() {
+    let cfg = config();
+    let storage = test_storage("as-of-future").await;
+    let retriever = RwLock::new(Retriever::new());
+    let l1_id = Uuid::new_v4();
+    {
+        let mut guard = retriever.write().expect("锁可用");
+        guard.index_l1(&L1DocView {
+            id: l1_id,
+            summary: "用户最近工作压力很大（历史摘要）".to_string(),
+            keywords: Some("工作压力".to_string()),
+            persona_uid: Some("char-0001".to_string()),
+            created_at: 2_000,
+            occurred_at: 2_000,
+            salience: 0.8,
+            last_accessed_at: None,
+        });
+        // 事件开始早于时钟、结束晚于时钟：只有按结束时间判定才会被剔除。
+        guard.index_l2(&L2DocView {
+            id: 9,
+            title: "工作压力事件".to_string(),
+            summary: "用户后来又一次提到工作压力".to_string(),
+            keywords: Some("工作压力".to_string()),
+            attitude: None,
+            paraphrase: None,
+            persona_uid: "char-0001".to_string(),
+            share: 1.0,
+            confidence: 0.9,
+            created_at: 2_500,
+            start: 2_500,
+            end: 9_000,
+            salience: 0.8,
+        });
+    }
+
+    let mut trace = RecallTrace::default();
+    let output = assemble_recall_with(
+        RecallInput {
+            retriever: &retriever,
+            keyword_mirror: &RwLock::new(KeywordService::new()),
+            storage: storage.as_ref(),
+            embedding: None,
+            query: "工作压力",
+            persona_uid: Some("char-0001"),
+            persona_kind: Some(PersonaKind::Char),
+            retrieval: &cfg.retrieval,
+            decay: &cfg.decay,
+            utt: &cfg.utt,
+            gates: RecallGates {
+                memory_rag: true,
+                utt: false,
+            },
+            memory_layers: RecallMemoryLayers::default(),
+            now_ms: 10_000,
+            as_of_ms: Some(5_000),
+        },
+        RecallOptions {
+            trace: Some(&mut trace),
+            touch: true,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        output.hits.len(),
+        1,
+        "只有历史摘要应命中: {:?}",
+        output.hits
+    );
+    assert_eq!(output.hits[0].id, format!("L1:{l1_id}"));
+    let context = output.memory_context.unwrap_or_default();
+    assert!(
+        context.contains("历史摘要"),
+        "上下文应含历史摘要: {context}"
+    );
+    assert!(
+        !context.contains("后来"),
+        "未来事件不应进入上下文: {context}"
+    );
+
+    let future = trace
+        .retrieval
+        .dropped
+        .iter()
+        .find(|d| d.reason == DropReason::Future)
+        .expect("应记录未来剔除");
+    assert_eq!(future.id, "L2:9");
+    assert!(future.score > 0.0, "分数应取该 label 的通道原始分");
+}
+
+/// 查询时钟即衰减基准：同一记忆在两个时钟节点上的衰减后分数不同，节点越晚分数越低。
+#[tokio::test]
+async fn query_clock_sets_decay_benchmark() {
+    let cfg = config();
+    let storage = test_storage("as-of-decay").await;
+    let retriever = seeded_retriever("用户最近工作压力很大", "persona-0001");
+    // 当前时间固定：若衰减误用 now_ms，两个时钟节点的分数会完全相同。
+    let fixed_now = 1_000 + 10 * DAY_MS;
+
+    let run = |as_of: i64| {
+        let retriever = &retriever;
+        let storage = storage.as_ref();
+        let cfg = &cfg;
+        async move {
+            assemble_recall(RecallInput {
+                retriever,
+                keyword_mirror: &RwLock::new(KeywordService::new()),
+                storage,
+                embedding: None,
+                query: "工作压力",
+                persona_uid: Some("persona-0001"),
+                persona_kind: Some(PersonaKind::Char),
+                retrieval: &cfg.retrieval,
+                decay: &cfg.decay,
+                utt: &cfg.utt,
+                gates: RecallGates {
+                    memory_rag: true,
+                    utt: false,
+                },
+                memory_layers: RecallMemoryLayers::default(),
+                now_ms: fixed_now,
+                as_of_ms: Some(as_of),
+            })
+            .await
+        }
+    };
+
+    let early = run(1_000 + 10 * DAY_MS).await;
+    let late = run(1_000 + 40 * DAY_MS).await;
+    let score = |output: &RecallOutput| {
+        output
+            .hits
+            .first()
+            .expect("同一记忆在前后两个时钟都应命中")
+            .score
+    };
+    assert!(
+        score(&late) < score(&early),
+        "更晚的查询时钟应得到更低的衰减后分数: early={}, late={}",
+        score(&early),
+        score(&late)
+    );
+}
+
 /// 通道命中计数映射：四个通道都出现在 `as_map` 输出中（含 0 值）。
 #[test]
 fn channels_map_contains_all_channels() {
@@ -773,4 +954,125 @@ fn channels_map_contains_all_channels() {
     assert_eq!(map.get("bm25"), Some(&3));
     assert_eq!(map.get("keyword"), Some(&1));
     assert_eq!(map.get("graph"), Some(&0));
+}
+
+// =========================================================
+// 访问时间刷新开关（touch）
+// =========================================================
+
+/// 造一个 persona 行（L1 外键依赖）。
+async fn seed_persona_row(storage: &dyn StorageBackend, persona_uid: &str) {
+    let persona = Persona::new(
+        persona_uid.to_string(),
+        "测试人格".to_string(),
+        PersonaKind::Char,
+        1,
+        "local".to_string(),
+    );
+    storage
+        .create_persona(&persona)
+        .await
+        .expect("插入 persona 应成功");
+}
+
+/// 读取 L1 行的访问时间（None = 从未被访问）。
+async fn l1_access_time(storage: &dyn StorageBackend, id: Uuid) -> Option<i64> {
+    storage
+        .get_memory_l1(id)
+        .await
+        .expect("读取 L1 应成功")
+        .expect("L1 行应存在")
+        .last_accessed_at
+}
+
+/// touch=false：不写访问时间，且召回输出与 touch=true 逐字段相等。
+#[tokio::test]
+async fn touch_disabled_skips_access_time_write() {
+    let cfg = config();
+    let storage = test_storage("touch-switch").await;
+    seed_persona_row(storage.as_ref(), "persona-0001").await;
+
+    let session = storage
+        .create_session(Some("persona-0001"))
+        .await
+        .expect("创建会话应成功");
+    let mut l1 = MemoryL1::new(session.id, "用户最近工作压力很大".to_string(), None);
+    l1.persona_uid = Some("persona-0001".to_string());
+    l1.created_at = 1_000;
+    let l1_id = l1.id;
+    storage.save_memory_l1(&l1).await.expect("写入 L1 应成功");
+
+    let retriever = RwLock::new({
+        let mut retriever = Retriever::new();
+        retriever.index_l1(&L1DocView {
+            id: l1_id,
+            summary: "用户最近工作压力很大".to_string(),
+            keywords: Some("工作压力".to_string()),
+            persona_uid: Some("persona-0001".to_string()),
+            created_at: 1_000,
+            occurred_at: 1_000,
+            salience: 0.8,
+            last_accessed_at: None,
+        });
+        retriever
+    });
+
+    let run = |touch: bool| {
+        let retriever = &retriever;
+        let storage = storage.as_ref();
+        let cfg = &cfg;
+        async move {
+            assemble_recall_with(
+                RecallInput {
+                    retriever,
+                    keyword_mirror: &RwLock::new(KeywordService::new()),
+                    storage,
+                    embedding: None,
+                    query: "工作压力",
+                    persona_uid: Some("persona-0001"),
+                    persona_kind: Some(PersonaKind::Char),
+                    retrieval: &cfg.retrieval,
+                    decay: &cfg.decay,
+                    utt: &cfg.utt,
+                    gates: RecallGates {
+                        memory_rag: true,
+                        utt: false,
+                    },
+                    memory_layers: RecallMemoryLayers::default(),
+                    now_ms: 2_000,
+                    as_of_ms: None,
+                },
+                RecallOptions { trace: None, touch },
+            )
+            .await
+        }
+    };
+
+    assert_eq!(
+        l1_access_time(storage.as_ref(), l1_id).await,
+        None,
+        "新建 L1 不应有访问时间"
+    );
+
+    let untouched = run(false).await;
+    assert_eq!(
+        l1_access_time(storage.as_ref(), l1_id).await,
+        None,
+        "touch=false 不应刷新访问时间"
+    );
+
+    let touched = run(true).await;
+    assert_eq!(
+        l1_access_time(storage.as_ref(), l1_id).await,
+        Some(2_000),
+        "touch=true 应按查询时钟写入访问时间"
+    );
+
+    assert_eq!(untouched.memory_context, touched.memory_context);
+    assert_eq!(untouched.doc_labels, touched.doc_labels);
+    assert_eq!(untouched.utt_context, touched.utt_context);
+    assert_eq!(untouched.hits, touched.hits);
+    assert_eq!(untouched.channels, touched.channels);
+    assert_eq!(untouched.fused_count, touched.fused_count);
+    assert_eq!(untouched.filtered_count, touched.filtered_count);
 }

@@ -27,7 +27,9 @@ use crate::vector::{VectorHit, VectorIndex};
 use ramaria_core::keyword::KeywordToken;
 
 use super::Retriever;
-use super::helpers::{count_keyword_matches, parse_doc_label, parse_graph_label, resolve_bm25_doc};
+use super::helpers::{
+    count_keyword_matches, label_time_ms, parse_doc_label, parse_graph_label, resolve_bm25_doc,
+};
 use super::types::{L1DocView, SearchRequest, SearchResult};
 
 /// 向量检索失败告警节流窗口（按累计次数）：首次失败立即告警，其后每 100 次告警一次。
@@ -46,7 +48,25 @@ impl Retriever {
     /// - `request`: 检索请求
     /// - `query_vec`: 可选的 query 向量（若未提供则跳过向量通道）
     pub fn search(&self, request: &SearchRequest, query_vec: Option<&[f32]>) -> Vec<SearchResult> {
-        self.search_with_keyword_hits(request, query_vec, None)
+        self.search_at(request, query_vec, None)
+    }
+
+    /// 执行多通道组合检索，并按查询时钟剔除未来单元（不含关键词镜像通道）。
+    ///
+    /// 参数:
+    /// - `request` / `query_vec`: 同 `search`；
+    /// - `as_of_ms`: 查询时钟（Unix 毫秒）；`None` = 不过滤（产品路径）。
+    ///
+    /// 返回:
+    /// - 与 `search` 逐项一致的结果；传 `Some` 时时间晚于该时钟的 L1 / L2 单元
+    ///   在融合前被剔除。
+    pub fn search_at(
+        &self,
+        request: &SearchRequest,
+        query_vec: Option<&[f32]>,
+        as_of_ms: Option<i64>,
+    ) -> Vec<SearchResult> {
+        self.search_with_keyword_hits_at(request, query_vec, None, as_of_ms)
     }
 
     /// 执行多通道组合检索（可含关键词镜像通道）。
@@ -68,7 +88,25 @@ impl Retriever {
         query_vec: Option<&[f32]>,
         keyword_hits: Option<Vec<(String, f64)>>,
     ) -> Vec<SearchResult> {
-        self.search_inner(request, query_vec, keyword_hits, None)
+        self.search_with_keyword_hits_at(request, query_vec, keyword_hits, None)
+    }
+
+    /// 执行多通道组合检索，并按查询时钟剔除未来单元（可含关键词镜像通道）。
+    ///
+    /// 参数:
+    /// - `request` / `query_vec` / `keyword_hits`: 同 `search_with_keyword_hits`；
+    /// - `as_of_ms`: 查询时钟（Unix 毫秒）；`None` = 不过滤（产品路径）。
+    ///
+    /// 返回:
+    /// - 与 `search_with_keyword_hits` 逐项一致的结果；传 `Some` 时剔除未来单元。
+    pub fn search_with_keyword_hits_at(
+        &self,
+        request: &SearchRequest,
+        query_vec: Option<&[f32]>,
+        keyword_hits: Option<Vec<(String, f64)>>,
+        as_of_ms: Option<i64>,
+    ) -> Vec<SearchResult> {
+        self.search_inner(request, query_vec, keyword_hits, None, as_of_ms)
     }
 
     /// 执行多通道组合检索并采集检索阶段轨迹。
@@ -89,8 +127,28 @@ impl Retriever {
         query_vec: Option<&[f32]>,
         keyword_hits: Option<Vec<(String, f64)>>,
     ) -> (Vec<SearchResult>, RetrievalTrace) {
+        self.search_traced_at(request, query_vec, keyword_hits, None)
+    }
+
+    /// 执行多通道组合检索并采集轨迹，同时按查询时钟剔除未来单元。
+    ///
+    /// 参数:
+    /// - `request` / `query_vec` / `keyword_hits`: 同 `search_traced`；
+    /// - `as_of_ms`: 查询时钟（Unix 毫秒）；`None` = 不过滤（产品路径）。
+    ///
+    /// 返回:
+    /// - 检索结果与阶段轨迹；被剔除的未来单元记 `DropReason::Future`，
+    ///   分数取该 label 在各通道的最大原始分。
+    pub fn search_traced_at(
+        &self,
+        request: &SearchRequest,
+        query_vec: Option<&[f32]>,
+        keyword_hits: Option<Vec<(String, f64)>>,
+        as_of_ms: Option<i64>,
+    ) -> (Vec<SearchResult>, RetrievalTrace) {
         let mut trace = RetrievalTrace::default();
-        let results = self.search_inner(request, query_vec, keyword_hits, Some(&mut trace));
+        let results =
+            self.search_inner(request, query_vec, keyword_hits, Some(&mut trace), as_of_ms);
         (results, trace)
     }
 
@@ -99,20 +157,27 @@ impl Retriever {
     /// 参数:
     /// - `request` / `query_vec` / `keyword_hits`: 同 `search_with_keyword_hits`；
     /// - `trace`: 传 `Some` 时按通道 / 融合 / 丢弃三个阶段写入；
-    ///   `None` 时不构造任何轨迹数据，行为与开销与无轨迹路径一致。
+    ///   `None` 时不构造任何轨迹数据，行为与开销与无轨迹路径一致；
+    /// - `as_of_ms`: 查询时钟（Unix 毫秒）；`None` = 不过滤。
+    ///
+    /// 未来过滤:
+    /// - L1 取 `occurred_at`、L2 取事件 `end`；时间晚于时钟的候选在融合前逐通道剔除，
+    ///   否则未来单元会先占融合名次与 top_k 截断名额，把可用的历史单元挤出结果。
+    /// - 图谱实体与无法解析的 label 没有可比时间，不参与过滤（保留）。
     fn search_inner(
         &self,
         request: &SearchRequest,
         query_vec: Option<&[f32]>,
         keyword_hits: Option<Vec<(String, f64)>>,
         mut trace: Option<&mut RetrievalTrace>,
+        as_of_ms: Option<i64>,
     ) -> Vec<SearchResult> {
         // ---- BM25 通道 ----
         // 只取融合所需的候选量：按 request.top_k 的固定倍数超取（下限 64），
         // 避免对全库命中逐条构造 label 与解析文档；label 解析延后到融合截断之后。
         const BM25_OVERFETCH_MULTIPLIER: usize = 8;
         const BM25_MIN_LIMIT: usize = 64;
-        let bm25_channel = if self.config.enable_bm25 {
+        let mut bm25_channel = if self.config.enable_bm25 {
             let limit = request
                 .top_k
                 .saturating_mul(BM25_OVERFETCH_MULTIPLIER)
@@ -134,7 +199,7 @@ impl Retriever {
         };
 
         // ---- 向量通道 ----
-        let vector_channel: Option<ChannelResult<String>> = if self.config.enable_vector {
+        let mut vector_channel: Option<ChannelResult<String>> = if self.config.enable_vector {
             if let Some(qv) = query_vec {
                 match self.vector_index.search(qv, &self.config.vector) {
                     Ok(hits) => {
@@ -173,7 +238,7 @@ impl Retriever {
         };
 
         // ---- 图谱通道 ----
-        let graph_channel: Option<ChannelResult<String>> = if self.config.enable_graph {
+        let mut graph_channel: Option<ChannelResult<String>> = if self.config.enable_graph {
             let graph_hits = self
                 .graph_retriever
                 .search(&request.query, &self.config.graph);
@@ -188,14 +253,62 @@ impl Retriever {
         };
 
         // ---- 关键词镜像通道（外部注入；有数据且开关开启才进入融合） ----
-        let keyword_channel: Option<ChannelResult<String>> = if self.config.enable_keyword_channel {
-            match keyword_hits {
-                Some(hits) if !hits.is_empty() => Some(ChannelResult { results: hits }),
-                _ => None,
+        let mut keyword_channel: Option<ChannelResult<String>> =
+            if self.config.enable_keyword_channel {
+                match keyword_hits {
+                    Some(hits) if !hits.is_empty() => Some(ChannelResult { results: hits }),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+        // ---- 未来过滤（查询时钟） ----
+        // 必须发生在融合之前：未来单元若进入融合，会先占名次与 top_k 截断名额，
+        // 把真正可用的历史单元挤出结果。
+        // L1 取 occurred_at、L2 取事件 end；图谱实体与无法解析的 label 没有可比时间，保留。
+        // 同一 label 命中多个通道时只记一次，分数取各通道最大原始分；无轨迹时不构造条目。
+        let mut future_drops: Vec<DroppedTrace> = Vec::new();
+        if let Some(as_of) = as_of_ms {
+            let collect_drops = trace.is_some();
+            for channel in [
+                &mut vector_channel,
+                &mut bm25_channel,
+                &mut graph_channel,
+                &mut keyword_channel,
+            ] {
+                let emptied = {
+                    let Some(result) = channel.as_mut() else {
+                        continue;
+                    };
+                    result.results.retain(|(label, score)| {
+                        let Some(at_ms) = label_time_ms(label, &self.l1_docs, &self.l2_docs) else {
+                            return true;
+                        };
+                        if at_ms <= as_of {
+                            return true;
+                        }
+                        if collect_drops {
+                            match future_drops.iter_mut().find(|d| &d.id == label) {
+                                Some(existing) => existing.score = existing.score.max(*score),
+                                None => future_drops.push(DroppedTrace {
+                                    id: label.clone(),
+                                    reason: DropReason::Future,
+                                    score: *score,
+                                }),
+                            }
+                        }
+                        false
+                    });
+                    result.results.is_empty()
+                };
+                // 被过滤空的通道按缺席处理：融合只对"参与的通道"计权，空结果若留在
+                // Some 分支会给所有候选加同一份惩罚项，改变衰减后的相对次序。
+                if emptied {
+                    *channel = None;
+                }
             }
-        } else {
-            None
-        };
+        }
 
         // ---- 轨迹：四通道候选（缺席通道也记一条，active=false、候选为空） ----
         if let Some(t) = trace.as_deref_mut() {
@@ -277,7 +390,8 @@ impl Retriever {
                     }
                 }
             }
-            t.dropped = cut;
+            t.dropped = future_drops;
+            t.dropped.extend(cut);
         }
 
         if fused.is_empty() {

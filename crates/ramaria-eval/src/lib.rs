@@ -15,6 +15,7 @@ pub mod baseline;
 pub mod command;
 pub mod corpus;
 pub mod measure;
+pub mod run;
 pub mod sandbox;
 pub mod stats;
 pub mod tui;
@@ -22,6 +23,10 @@ pub mod tui;
 pub use assembly::{EVAL_CONFIG_FILE, EVAL_DB_FILE, open_engine, write_config_snapshot};
 pub use baseline::{BaselineArtifact, BaselineReport};
 pub use command::{EvalCommand, run};
+pub use run::{
+    BaselineTier, Condition, Pipeline, RunItem, RunItemRecord, RunMatrix, RunReport, RunState,
+    RunWorkspace, build_full_context, plan_items,
+};
 pub use sandbox::{
     SandboxBackendChoice, SandboxBackendMode, SandboxInput, SandboxModelKind, SandboxOptions,
     SandboxReport, StageKind, StageReport, StageStatus, run_line_mode,

@@ -89,12 +89,17 @@ pub(super) async fn behavior_layer(
 
 /// 知识层：判定器命中后渲染知识卡片。
 ///
+/// 参数:
+/// - `as_of_ms`: 查询时钟（Unix 毫秒）；`Some` 时剔除发生时间晚于该时钟的事实，
+///   渲染文本与结构化条目同步收窄。
+///
 /// 降级:
 /// - 判定器关闭 / 未命中 / 读取失败 → 空（不注入）。
 pub(super) async fn knowledge_layer(
     engine: &Engine,
     persona: &str,
     query: &str,
+    as_of_ms: Option<i64>,
 ) -> (Option<String>, Vec<RecallItem>) {
     let config = engine.config().knowledge.clone();
     let facts = ramaria_memory::fact::retriever::load_knowledge_facts_for_query(
@@ -104,6 +109,15 @@ pub(super) async fn knowledge_layer(
         query,
     )
     .await;
+    // 未来事实（发生时间晚于查询时钟）不参与渲染：过滤在卡片渲染与条目映射之前，
+    // 保证段落文本与结构化条目同一口径收窄。
+    let facts = match as_of_ms {
+        Some(as_of) => facts
+            .into_iter()
+            .filter(|fact| fact.occurred_at.unwrap_or(fact.created_at) <= as_of)
+            .collect(),
+        None => facts,
+    };
     if facts.is_empty() {
         return (None, Vec::new());
     }

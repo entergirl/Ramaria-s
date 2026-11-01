@@ -10,7 +10,7 @@
 //!   索引未加载 → 空召回（不视为故障，也不阻塞调用方）
 //! - 隐私：不记录查询文本与记忆原文，日志只记计数、维度与字符数
 //! - 轨迹可选：`assemble_recall_with` 收 `RecallOptions`，传入时按阶段回填 `RecallTrace`，
-//!   默认入口不采集轨迹
+//!   默认入口不采集轨迹；`touch` 控制命中后是否刷新 L1 访问时间（默认刷新）
 mod assemble;
 mod types;
 

@@ -264,6 +264,20 @@ fn product_default(reason: impl Into<String>) -> ResolvedBackend {
     }
 }
 
+/// 按地址识别云端 provider。
+///
+/// 说明:
+/// - DeepSeek 官方域名的凭据条目与通用 OpenAI 兼容服务不同，必须选用
+///   `DeepSeek` provider 才能读到同一份系统凭据；
+/// - 其余云端地址按通用 OpenAI 兼容服务处理。
+fn cloud_provider(base_url: &str) -> LlmProviderKind {
+    if base_url.contains("api.deepseek.com") {
+        LlmProviderKind::DeepSeek
+    } else {
+        LlmProviderKind::OpenAI
+    }
+}
+
 /// 解析独立配置：本地模型补默认地址，云端模型缺项直接拒绝。
 fn resolve_independent(
     kind: SandboxModelKind,
@@ -300,7 +314,7 @@ fn resolve_independent(
                 return Err(RamariaError::validation("云端模型必须填写模型标识"));
             }
             (
-                LlmProviderKind::OpenAI,
+                cloud_provider(base_url),
                 base_url,
                 SandboxBackendMode::Cloud,
                 None,

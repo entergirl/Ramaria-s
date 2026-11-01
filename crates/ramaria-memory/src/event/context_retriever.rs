@@ -291,6 +291,7 @@ mod tests {
             confidence: 0.9,
             created_at: 1500,
             start: 1500,
+            end: 1500,
             salience: 0.9,
         });
         r.index_l2(&L2DocView {
@@ -305,6 +306,7 @@ mod tests {
             confidence: 0.85,
             created_at: 2500,
             start: 2500,
+            end: 2500,
             salience: 0.85,
         });
 

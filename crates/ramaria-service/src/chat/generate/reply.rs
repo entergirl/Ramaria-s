@@ -54,7 +54,7 @@ pub(crate) async fn reply_to_inbound(
         proactive: None,
     };
 
-    let prepared = prepare_request(engine, &input, config.as_ref()).await?;
+    let prepared = prepare_request(engine, &input, config.as_ref(), None).await?;
     tracing::info!(
         request_id = %prepared.request_id,
         session_id = %prepared.session_id,

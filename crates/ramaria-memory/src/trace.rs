@@ -83,7 +83,7 @@ pub struct FusedEntryTrace {
 /// 条目被丢弃的原因。
 ///
 /// 职责:
-/// - 区分丢弃发生在哪一阶段：`FusionCut` / `PersonaMismatch` / `DocMissing` 由检索器记录，
+/// - 区分丢弃发生在哪一阶段：`Future` / `FusionCut` / `PersonaMismatch` / `DocMissing` 由检索器记录，
 ///   `LayerFiltered` / `PersonaShare` / `MaxMemories` 由召回装配记录。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -100,6 +100,8 @@ pub enum DropReason {
     DocMissing,
     /// 文档归属人格与请求目标不一致
     PersonaMismatch,
+    /// 记忆时间晚于查询时钟（未来单元，融合前剔除）
+    Future,
 }
 
 /// 被丢弃条目。

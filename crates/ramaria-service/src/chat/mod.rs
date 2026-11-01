@@ -31,7 +31,7 @@ mod social;
 mod steps;
 
 // 用例入口 re-export：`crate::chat::run` / `crate::chat::stream` 为入口层既有调用路径
-pub(crate) use generate::{reply_to_inbound, run, stream};
+pub(crate) use generate::{answer_eval, reply_to_inbound, run, stream};
 // 主动生成入口 re-export：供引擎用例门面调用（主动调度接入前无生产调用方）
 pub(crate) use proactive::run as run_proactive;
 // 素材装载与提示装配步骤 re-export：供人格提示词预览用例复用（同一份装配链路）
@@ -52,6 +52,9 @@ mod tests_social;
 
 #[cfg(test)]
 mod tests_stream;
+
+#[cfg(test)]
+mod tests_eval;
 
 #[cfg(test)]
 mod tests_thinking;

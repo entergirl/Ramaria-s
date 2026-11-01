@@ -29,6 +29,9 @@ use super::policy::RecallPolicy;
 // =========================================================
 
 /// 检索模式：记忆层共用召回 + 其余分层装配。
+///
+/// 参数:
+/// - `as_of_ms`: 查询时钟（Unix 毫秒）；`None` = 产品路径（衰减基准取当前时间、不按未来过滤）。
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn search(
     engine: &Engine,
@@ -38,6 +41,7 @@ pub(super) async fn search(
     query: &str,
     max_items: usize,
     max_chars: usize,
+    as_of_ms: Option<i64>,
     trace: Option<&mut RecallTrace>,
 ) -> RamariaResult<RecallResult> {
     // 索引未就绪时的首问降级：不进构建路径（不改索引状态），用存储直读 BM25 出召回；
@@ -92,8 +96,13 @@ pub(super) async fn search(
                 l2: wants(RecallLayer::L2),
             },
             now_ms: now_ms(),
+            as_of_ms,
         },
-        RecallOptions { trace },
+        RecallOptions {
+            trace,
+            // 产品召回路径刷新访问时间（既有口径）；评测入口经 chat 侧另行传入。
+            touch: true,
+        },
     )
     .await;
 
@@ -110,7 +119,7 @@ pub(super) async fn search(
 
     // 2) 知识层（判定器命中 + 时效召回；渲染走 memory 的卡片渲染）
     if wants(RecallLayer::Knowledge) {
-        let (text, layer_items) = knowledge_layer(engine, persona, query).await;
+        let (text, layer_items) = knowledge_layer(engine, persona, query, as_of_ms).await;
         push_section(&mut sections, &mut items, text, layer_items);
     }
 

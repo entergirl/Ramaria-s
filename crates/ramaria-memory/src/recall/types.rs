@@ -263,6 +263,12 @@ pub struct RecallInput<'a, R: RetrieverSource + ?Sized, K: KeywordMirrorSource +
     pub memory_layers: RecallMemoryLayers,
     /// 当前时间（Unix 毫秒，衰减与访问加成基准）。
     pub now_ms: i64,
+    /// 查询时钟（Unix 毫秒）：`None` = 使用 `now_ms`（产品路径）。
+    ///
+    /// 约定:
+    /// - 传 `Some(as_of)` 时同时作为衰减基准与未来过滤线（评测口径）；
+    /// - 只改变衰减取值与候选过滤，不改变闸门、分层选择、预算与渲染逻辑。
+    pub as_of_ms: Option<i64>,
 }
 
 /// 召回装配选项。
@@ -270,9 +276,22 @@ pub struct RecallInput<'a, R: RetrieverSource + ?Sized, K: KeywordMirrorSource +
 /// 字段约定:
 /// - `trace`: 传 `Some(&mut RecallTrace)` 时采集诊断轨迹；`None`（默认）不采集，
 ///   装配过程不构造任何轨迹数据，返回值、排序与开销均不受影响。
-#[derive(Default)]
+/// - `touch`: 命中 L1 后是否刷新访问时间；`true`（默认，产品口径）刷新，
+///   `false` 跳过写库（评测口径：同一夹具在条件间与续跑时保持相同访问时间）。
+///   关闭只跳过写库，本次排序与分数仍按现有 `last_accessed_at` 计算。
 pub struct RecallOptions<'a> {
     pub trace: Option<&'a mut RecallTrace>,
+    pub touch: bool,
+}
+
+impl Default for RecallOptions<'_> {
+    /// 默认口径：不采集轨迹、刷新访问时间（与产品路径逐字段一致）。
+    fn default() -> Self {
+        Self {
+            trace: None,
+            touch: true,
+        }
+    }
 }
 
 /// 单个检索通道的命中计数（诊断用）。

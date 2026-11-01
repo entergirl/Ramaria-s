@@ -13,7 +13,10 @@ use crate::bm25::DocId;
 use crate::retriever::{L1DocView, Retriever, SearchResult};
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::traits::StorageBackend;
-use ramaria_core::types::{MemoryL1, Persona, PersonaKind};
+use ramaria_core::types::{
+    FactSource, MemoryL1, Persona, PersonaFact, PersonaKind, PersonalityTrait, ProfileField,
+    TraitLayer, TraitSource,
+};
 use uuid::Uuid;
 
 /// 用真实 SQLite（临时文件库）构造存储后端（脉络素材只需 L1 读写路径）。
@@ -404,6 +407,7 @@ fn segment_style_inputs<'a>(
         group_conversation,
         recent_state: RecentStateConfig::default(),
         proactive: None,
+        material: MaterialLoadMask::default(),
     }
 }
 
@@ -698,4 +702,174 @@ async fn recent_state_without_samples_skips_injection() {
     .await;
 
     assert!(!prompt.contains("近期状态"), "无样本时不应注入近期状态行");
+}
+
+// =========================================================
+// 素材加载层掩码
+// =========================================================
+
+/// 冷启动兜底用的最小 persona.toml（DB persona.config 内容）。
+const PERSONA_TOML: &str = r#"[identity]
+assistant_name = "测试人格"
+user_name = "用户"
+
+[blocks]
+A_persona = "测试人格的自我介绍。"
+E_rules = "用||分隔回复。"
+"#;
+
+/// 组装素材掩码用例的最小输入（无摘要 / 无示例 / 无知识卡片）。
+fn material_mask_inputs<'a>(
+    injection: &'a ramaria_core::config::InjectionGate,
+    layer_dedup: &'a ramaria_core::config::LayerDedupConfig,
+    material: MaterialLoadMask,
+) -> PromptMaterialInputs<'a> {
+    PromptMaterialInputs {
+        persona_uid: Some("rama-0001"),
+        recent_summaries: &[],
+        last_active_at: None,
+        utt_context: None,
+        bridge_context: None,
+        behavior_decision: None,
+        examples: Vec::new(),
+        max_examples: 3,
+        knowledge_facts: Vec::new(),
+        rag_covered_labels: &[],
+        knowledge_budget_chars: None,
+        injection,
+        style_enabled: false,
+        rag_text: None,
+        layer_dedup,
+        segment_style: SegmentStyle::Pipe,
+        group_conversation: false,
+        recent_state: RecentStateConfig::default(),
+        proactive: None,
+        material,
+    }
+}
+
+/// facts / traits 关闭：对应块不加载也不渲染，另一层不受影响。
+#[tokio::test]
+async fn material_mask_skips_facts_and_traits() {
+    let storage = test_storage("material-mask").await;
+    ensure_persona(storage.as_ref(), "rama-0001").await;
+    storage
+        .save_fact(&PersonaFact::new(
+            "rama-0001".to_string(),
+            ProfileField::BasicInfo,
+            "对方养了一只叫团子的猫".to_string(),
+            FactSource::Manual,
+        ))
+        .await
+        .expect("写入事实应成功");
+    storage
+        .save_trait(&PersonalityTrait::new(
+            "rama-0001".to_string(),
+            TraitLayer::Primary,
+            "慢热".to_string(),
+            "被问起才说".to_string(),
+            TraitSource::Manual,
+            1,
+        ))
+        .await
+        .expect("写入性格标签应成功");
+
+    let config = RamariaConfig::default();
+    let full = build_system_prompt(
+        storage.as_ref(),
+        &material_mask_inputs(
+            &config.injection,
+            &config.layer_dedup,
+            MaterialLoadMask::default(),
+        ),
+    )
+    .await;
+    assert!(full.contains("对方养了一只叫团子的猫"), "默认应加载事实");
+    assert!(full.contains("慢热"), "默认应加载性格标签");
+
+    let no_facts = build_system_prompt(
+        storage.as_ref(),
+        &material_mask_inputs(
+            &config.injection,
+            &config.layer_dedup,
+            MaterialLoadMask {
+                facts: false,
+                ..MaterialLoadMask::default()
+            },
+        ),
+    )
+    .await;
+    assert!(
+        !no_facts.contains("对方养了一只叫团子的猫"),
+        "关闭 facts 后不应出现事实块"
+    );
+    assert!(no_facts.contains("慢热"), "关闭 facts 不应影响 traits");
+
+    let no_traits = build_system_prompt(
+        storage.as_ref(),
+        &material_mask_inputs(
+            &config.injection,
+            &config.layer_dedup,
+            MaterialLoadMask {
+                traits: false,
+                ..MaterialLoadMask::default()
+            },
+        ),
+    )
+    .await;
+    assert!(!no_traits.contains("慢热"), "关闭 traits 后不应出现性格块");
+    assert!(
+        no_traits.contains("对方养了一只叫团子的猫"),
+        "关闭 traits 不应影响 facts"
+    );
+}
+
+/// plain_fallback 关闭：facts / traits 全空也不回退 persona.toml 纯文本。
+#[tokio::test]
+async fn material_mask_disables_plain_fallback() {
+    let storage = test_storage("material-plain").await;
+    let mut persona = Persona::new(
+        "rama-0001".to_string(),
+        "测试人格".to_string(),
+        PersonaKind::Rama,
+        1,
+        "local".to_string(),
+    );
+    persona.config = Some(PERSONA_TOML.to_string());
+    storage
+        .create_persona(&persona)
+        .await
+        .expect("插入 persona 应成功");
+
+    let config = RamariaConfig::default();
+    let plain = load_prompt_material(
+        storage.as_ref(),
+        &material_mask_inputs(
+            &config.injection,
+            &config.layer_dedup,
+            MaterialLoadMask::default(),
+        ),
+    )
+    .await;
+    assert!(
+        matches!(plain, LoadedPromptMaterial::Plain(_)),
+        "facts/traits 全空且允许回退时应走 persona.toml 纯文本"
+    );
+
+    let structured = load_prompt_material(
+        storage.as_ref(),
+        &material_mask_inputs(
+            &config.injection,
+            &config.layer_dedup,
+            MaterialLoadMask {
+                plain_fallback: false,
+                ..MaterialLoadMask::default()
+            },
+        ),
+    )
+    .await;
+    assert!(
+        matches!(structured, LoadedPromptMaterial::Structured(..)),
+        "关闭回退后应保持结构化装配"
+    );
 }

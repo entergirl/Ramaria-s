@@ -180,6 +180,9 @@ pub struct L2DocView {
     pub created_at: i64,
     /// 事件发生开始时间（= MemoryEvent.start）——时间衰减与排序基准
     pub start: i64,
+    /// 事件结束时间（= MemoryEvent.end，Unix 毫秒）——查询时钟的未来过滤基准：
+    /// 结束时间晚于查询时钟的事件视为尚未发生，不参与召回
+    pub end: i64,
     pub salience: f64,
 }
 

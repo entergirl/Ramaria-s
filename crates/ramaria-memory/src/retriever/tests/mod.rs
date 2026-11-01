@@ -44,6 +44,7 @@ fn make_test_retriever() -> Retriever {
         confidence: 0.9,
         created_at: 1500,
         start: 1500,
+        end: 1500,
         salience: 0.9,
     });
 

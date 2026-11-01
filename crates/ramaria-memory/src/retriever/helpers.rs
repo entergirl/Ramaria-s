@@ -177,6 +177,34 @@ pub(super) fn parse_doc_label(
     }
 }
 
+/// 解析 label 的记忆时间口径（Unix 毫秒）。
+///
+/// 返回:
+/// - `L1:{uuid}` → 该 L1 的发生时间（`occurred_at`，读取侧已回退）；
+/// - `L2:{id}` → 该事件的结束时间（`end`）；
+/// - 图谱实体（`graph:{entity}`）、未知格式与视图内不存在的文档 → `None`（不参与时间过滤）。
+pub(super) fn label_time_ms(
+    label: &str,
+    l1_docs: &std::collections::HashMap<uuid::Uuid, super::types::L1DocView>,
+    l2_docs: &std::collections::HashMap<i64, super::types::L2DocView>,
+) -> Option<i64> {
+    if let Some(uuid_str) = label
+        .strip_prefix("L1:")
+        .or_else(|| label.strip_prefix("l1:"))
+    {
+        let id = uuid::Uuid::parse_str(uuid_str).ok()?;
+        l1_docs.get(&id).map(|doc| doc.occurred_at)
+    } else if let Some(id_str) = label
+        .strip_prefix("L2:")
+        .or_else(|| label.strip_prefix("l2:"))
+    {
+        let id = id_str.parse::<i64>().ok()?;
+        l2_docs.get(&id).map(|doc| doc.end)
+    } else {
+        None
+    }
+}
+
 /// 统计文档关键词字段中匹配到的查询关键词数量。
 ///
 /// 参数:

@@ -39,6 +39,7 @@ pub(super) fn l2_view(event: &ramaria_core::types::MemoryEvent) -> L2DocView {
         confidence: event.confidence,
         created_at: event.created_at,
         start: event.start,
+        end: event.end,
         salience: event.salience,
     }
 }

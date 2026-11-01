@@ -127,6 +127,7 @@ fn search_exact_l2_time_base_is_event_start() {
         confidence: 0.9,
         created_at: 9000, // 登记时刻
         start: 1000,      // 发生时刻
+        end: 1000,        // 与 start 同时刻（未来过滤基准）
         salience: 0.5,
     });
 
@@ -153,6 +154,7 @@ fn search_substring_l2_time_base_is_event_start() {
         confidence: 0.9,
         created_at: 8000, // 登记时刻
         start: 2000,      // 发生时刻
+        end: 2000,        // 与 start 同时刻（未来过滤基准）
         salience: 0.5,
     });
 

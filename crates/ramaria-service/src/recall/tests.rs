@@ -11,6 +11,7 @@
 
 use super::entry::resolve_query;
 use super::*;
+use crate::DropReason;
 use crate::test_support::{
     CountingEmbedding, MockLlm, engine_with_db, engine_with_llm_and_config,
     engine_with_llm_config_and_embedding, seed_l1 as seed_l1_raw, seed_persona, seed_persona_kind,
@@ -815,6 +816,159 @@ async fn recall_degrades_to_storage_bm25_while_index_building() {
         engine.index_status().status,
         IndexStatus::Building,
         "召回不应改写索引状态"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// =========================================================
+// 查询时钟（as_of）
+// =========================================================
+
+/// 评测时钟入口：as_of=None 与产品召回逐字段相等；时钟线之后的记忆不进入结果。
+#[tokio::test]
+async fn recall_at_matches_product_recall_until_clock_line() {
+    let (engine, storage, dir) = engine_with_db("recall-at").await;
+    seed_persona(&storage, "char-0001").await;
+    let early = seed_l1(&storage, "char-0001", "用户最近工作压力很大", 1_000).await;
+    let late = seed_l1(&storage, "char-0001", "用户后来工作压力更大", 5_000).await;
+    // 访问时间设为当前时刻：衰减命中访问加成保底，两次调用不受毫秒级 now 漂移影响。
+    let pool = engine.sqlite_pool().expect("测试引擎应附着连接池");
+    sqlx::query("UPDATE memory_l1 SET last_accessed_at = ?")
+        .bind(ramaria_core::types::now_ms())
+        .execute(&pool)
+        .await
+        .expect("更新访问时间应成功");
+    engine.ensure_index_loaded().await.expect("索引加载");
+
+    let req = RecallRequest {
+        query: Some("工作压力".to_string()),
+        persona: Some("char-0001".to_string()),
+        include: Some(vec![RecallLayer::L1]),
+        ..RecallRequest::default()
+    };
+    let plain = engine.recall(req.clone()).await.expect("产品召回成功");
+    let no_clock = engine
+        .recall_at(req.clone(), None)
+        .await
+        .expect("时钟缺省召回成功");
+    assert_eq!(no_clock, plain, "as_of=None 应与产品召回逐字段相等");
+
+    let traced = engine
+        .recall_with_trace_at(req.clone(), None)
+        .await
+        .expect("带轨迹召回成功");
+    assert_eq!(traced.result, plain, "带轨迹入口的结果应与产品召回一致");
+    assert!(
+        traced
+            .trace
+            .retrieval
+            .dropped
+            .iter()
+            .all(|d| d.reason != DropReason::Future),
+        "时钟缺省时不应产生未来剔除"
+    );
+
+    let before_late = engine
+        .recall_at(req, Some(3_000))
+        .await
+        .expect("按时钟召回成功");
+    let ids: Vec<&str> = before_late
+        .items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
+    assert!(
+        ids.contains(&format!("L1:{early}").as_str()),
+        "时钟之前的记忆应保留: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&format!("L1:{late}").as_str()),
+        "时钟之后的记忆应被剔除: {ids:?}"
+    );
+    assert!(
+        !before_late.context.contains("后来工作压力"),
+        "上下文不应含未来记忆: {}",
+        before_late.context
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 知识层按查询时钟过滤：发生时间晚于时钟的事实不渲染、不出条目。
+#[tokio::test]
+async fn knowledge_layer_hides_facts_after_clock() {
+    let (engine, storage, dir) = engine_with_db("knowledge-clock").await;
+    seed_persona(&storage, "char-0001").await;
+
+    let past_event = ramaria_core::types::MemoryEvent::new(
+        "char-0001".to_string(),
+        "早期事件".to_string(),
+        "早期事件摘要".to_string(),
+        1_000,
+        1_500,
+    );
+    let past_event_id = storage.save_event(&past_event).await.expect("写入事件");
+    let future_event = ramaria_core::types::MemoryEvent::new(
+        "char-0001".to_string(),
+        "后续事件".to_string(),
+        "后续事件摘要".to_string(),
+        9_000,
+        9_500,
+    );
+    let future_event_id = storage.save_event(&future_event).await.expect("写入事件");
+
+    let make_fact = |content: &str, event_id: i64| {
+        let mut fact = ramaria_core::types::PersonaFact::new(
+            "char-0001".to_string(),
+            ProfileField::Interests,
+            content.to_string(),
+            FactSource::Manual,
+        );
+        fact.tier = FactTier::Stable;
+        fact.keyword_hint = Some("露营".to_string());
+        fact.ref_event_id = Some(event_id);
+        fact
+    };
+    storage
+        .save_fact(&make_fact("喜欢徒步", past_event_id))
+        .await
+        .expect("写入事实");
+    storage
+        .save_fact(&make_fact("计划攀岩", future_event_id))
+        .await
+        .expect("写入事实");
+
+    let result = engine
+        .recall_at(
+            RecallRequest {
+                query: Some("你还记得我喜欢露营吗".to_string()),
+                persona: Some("char-0001".to_string()),
+                include: Some(vec![RecallLayer::Knowledge]),
+                ..RecallRequest::default()
+            },
+            Some(5_000),
+        )
+        .await
+        .expect("召回成功");
+
+    assert!(
+        result.context.contains("喜欢徒步"),
+        "时钟之前的事实应渲染: {}",
+        result.context
+    );
+    assert!(
+        !result.context.contains("计划攀岩"),
+        "时钟之后的事实不应渲染: {}",
+        result.context
+    );
+    assert!(
+        result
+            .items
+            .iter()
+            .all(|item| item.text.contains("喜欢徒步")),
+        "结构化条目应与渲染文本同步收窄: {:?}",
+        result.items
     );
 
     let _ = std::fs::remove_dir_all(&dir);

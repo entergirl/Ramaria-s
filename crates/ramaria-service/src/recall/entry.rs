@@ -37,7 +37,25 @@ use super::search::search;
 /// 返回:
 /// - 成功时返回 `context`（可直接拼接的段落文本）、`items`（结构化明细）与 `stats`。
 pub(crate) async fn run(engine: &Engine, req: RecallRequest) -> RamariaResult<RecallResult> {
-    run_inner(engine, req, None).await
+    run_inner(engine, req, None, None).await
+}
+
+/// 在指定查询时钟下执行召回用例（评测口径）。
+///
+/// 参数:
+/// - `engine` / `req`: 同 [`run`]；
+/// - `as_of_ms`: 查询时钟（Unix 毫秒）；`Some` 时同时作为衰减基准与未来过滤线，
+///   `None` 与 [`run`] 等价。
+///
+/// 说明:
+/// - 概览模式（无检索输入）按时间线读库，不参与时钟过滤；
+/// - 产品入口不调用本用例。
+pub(crate) async fn run_at(
+    engine: &Engine,
+    req: RecallRequest,
+    as_of_ms: Option<i64>,
+) -> RamariaResult<RecallResult> {
+    run_inner(engine, req, as_of_ms, None).await
 }
 
 /// 执行召回用例并采集诊断轨迹。
@@ -54,7 +72,26 @@ pub(crate) async fn run_traced(
     req: RecallRequest,
 ) -> RamariaResult<RecallWithTrace> {
     let mut trace = RecallTrace::default();
-    let result = run_inner(engine, req, Some(&mut trace)).await?;
+    let result = run_inner(engine, req, None, Some(&mut trace)).await?;
+    Ok(RecallWithTrace { result, trace })
+}
+
+/// 在指定查询时钟下执行召回用例并采集诊断轨迹。
+///
+/// 参数:
+/// - `engine` / `req`: 同 [`run_traced`]；
+/// - `as_of_ms`: 查询时钟（Unix 毫秒）；`None` 与 [`run_traced`] 等价。
+///
+/// 说明:
+/// - 轨迹中的未来剔除条目记 `future`；
+/// - 产品入口不调用本用例。
+pub(crate) async fn run_traced_at(
+    engine: &Engine,
+    req: RecallRequest,
+    as_of_ms: Option<i64>,
+) -> RamariaResult<RecallWithTrace> {
+    let mut trace = RecallTrace::default();
+    let result = run_inner(engine, req, as_of_ms, Some(&mut trace)).await?;
     Ok(RecallWithTrace { result, trace })
 }
 
@@ -63,10 +100,12 @@ pub(crate) async fn run_traced(
 /// 参数:
 /// - `engine`: 服务层引擎（存储 / 配置 / 检索槽 / 策略）；
 /// - `req`: 召回请求（对话片段 / 人格 / 分层 / 预算）；
+/// - `as_of_ms`: 查询时钟；`None` = 不按时钟过滤（产品路径）；
 /// - `trace`: 传 `Some` 时由检索模式写入轨迹；概览模式忽略该参数。
 async fn run_inner(
     engine: &Engine,
     req: RecallRequest,
+    as_of_ms: Option<i64>,
     trace: Option<&mut RecallTrace>,
 ) -> RamariaResult<RecallResult> {
     let policy = engine.recall_policy();
@@ -96,7 +135,7 @@ async fn run_inner(
         "召回检索模式开始"
     );
     search(
-        engine, &policy, &persona, &include, &query, max_items, max_chars, trace,
+        engine, &policy, &persona, &include, &query, max_items, max_chars, as_of_ms, trace,
     )
     .await
 }

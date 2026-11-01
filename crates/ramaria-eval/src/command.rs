@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - 命令枚举只承载参数，不持有引擎与宿主句柄
 //! - 无参进入沙盒界面（TTY 为 TUI，非 TTY 为行模式）
-//! - 语料校验与基线建库已落地，报告与产物摘要直出标准输出
+//! - 语料校验、基线建库与批量运行已落地，报告与产物摘要直出标准输出
 //! - 未实现子命令统一返回 unsupported，文案带子命令名
 //! - 错误走 core 结构化错误，由入口层统一映射 exit code
 
@@ -80,6 +80,7 @@ impl EvalCommand {
 /// - 无参：TTY 下进入沙盒界面，非 TTY 读取标准输入并运行沙盒（报告写标准输出）；
 /// - `corpus verify`：校验通过时报告写标准输出，失败返回结构化错误；
 /// - `baseline`：逐档建库并导出产物，摘要写标准输出；
+/// - `run`：按矩阵批量运行，摘要写标准输出（已存在运行根则续跑）；
 /// - 其余子命令：`Unsupported`（尚未实现）。
 pub async fn run(command: Option<EvalCommand>, context: EvalContext) -> RamariaResult<()> {
     match command {
@@ -94,6 +95,15 @@ pub async fn run(command: Option<EvalCommand>, context: EvalContext) -> RamariaR
             output,
         }) => {
             let report = crate::baseline::run(corpus, tier, language, output).await?;
+            println!("{}", report.render());
+            Ok(())
+        }
+        Some(EvalCommand::Run {
+            corpus,
+            matrix,
+            output,
+        }) => {
+            let report = crate::run::run(corpus, matrix, output).await?;
             println!("{}", report.render());
             Ok(())
         }

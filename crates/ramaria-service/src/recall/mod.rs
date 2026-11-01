@@ -34,8 +34,8 @@ use ramaria_core::types::PersonaKind;
 // 策略 re-export：`crate::recall::RecallPolicy` 为引擎与入口层既有调用路径
 pub use policy::RecallPolicy;
 
-// 用例入口 re-export：`run` 为普通召回路径，`run_traced` 供带轨迹召回使用
-pub(crate) use entry::{run, run_traced};
+// 用例入口 re-export：`run` / `run_traced` 为产品路径，`run_at` / `run_traced_at` 为带查询时钟的评测路径
+pub(crate) use entry::{run, run_at, run_traced, run_traced_at};
 
 // =========================================================
 // 辅助

@@ -273,7 +273,7 @@ async fn prepare_request_persists_user_message_before_llm() {
         segment_style: SegmentStyle::Pipe,
         proactive: None,
     };
-    let prepared = prepare_request(&engine, &input, engine.config().as_ref())
+    let prepared = prepare_request(&engine, &input, engine.config().as_ref(), None)
         .await
         .expect("前置编排应成功");
     assert!(prepared.user_persisted, "交互式前置编排应落库用户消息");

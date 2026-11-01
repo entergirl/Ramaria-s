@@ -22,11 +22,16 @@ use ramaria_memory::chat::{
 };
 use ramaria_memory::prompt::PROMPT_TEMPLATE_VERSION;
 use ramaria_memory::prompt::builder::assemble_prompt_coordinated;
-use ramaria_memory::recall::{RecallGates, RecallInput, RecallMemoryLayers, assemble_recall};
+use ramaria_memory::recall::{
+    RecallGates, RecallHit, RecallInput, RecallMemoryLayers, RecallOptions, RecallOutput,
+    assemble_recall, assemble_recall_with,
+};
 use ramaria_memory::token_budget::{self, TokenBudgetConfig};
+use ramaria_memory::trace::RecallTrace;
 use uuid::Uuid;
 
 use crate::engine::Engine;
+use crate::types::{EvalChatOptions, EvalRecallItem, EvalRecallObservation};
 
 // =========================================================
 // 角色沉浸指令（对话路径可选注入）
@@ -45,14 +50,23 @@ pub(super) const ROLE_IMMERSION_DIRECTIVE: &str = r#"【角色沉浸要求】这
 // 步骤实现：记忆召回与素材装载
 // =========================================================
 
-/// 步骤 6：记忆召回（共用 `assemble_recall`），返回记忆上下文 / 文档覆盖集合 / 原文片段。
+/// 步骤 6：记忆召回（共用 `assemble_recall`），返回记忆上下文 / 文档覆盖集合 / 原文片段 / 评测观测。
 ///
 /// 闸门口径:
 /// - `memory_rag` 取 `[injection].memory_rag`（配置驱动）；
 /// - `utt` = `[injection].utt` × `[utt].enabled` × 宿主策略 `allow_raw_text`；
-/// - 摘要路两层（L1 + L2）全开。
+/// - 摘要路两层（L1 + L2）全开；
+/// - 评测选项存在时再与层掩码取交集（`memory_rag` 还要求 l1 / l2 至少一层开启）。
+///
+/// 参数:
+/// - `eval`: 评测选项；`None` 走产品路径（不采集轨迹、刷新访问时间、两层全开）。
+///
+/// 返回:
+/// - 产品路径第四项为 `None`；评测路径返回观测（条目 / 轨迹 / 体量，不含原文）。
 ///
 /// 说明:
+/// - 预置上下文（评测 full-context 对照）：`preset_context` 为 `Some` 时直接作为记忆上下文
+///   返回，不检索、不生成查询向量、不读写检索器；空串或全空白按无上下文处理；
 /// - 索引未就绪时走存储直读 BM25 降级（不进构建路径、不改索引状态），
 ///   已加载时执行懒加载 / 代次刷新；构建失败只记 warn 并继续（首条消息不阻塞）；
 /// - 其余降级（嵌入缺失 / 无命中 / 白名单外）由共用实现内部处理，返回空值。
@@ -62,12 +76,30 @@ pub(crate) async fn step_recall(
     config: &RamariaConfig,
     persona: &str,
     message: &str,
-) -> RamariaResult<(Option<String>, Vec<String>, Option<String>)> {
+    eval: Option<&EvalChatOptions>,
+) -> RamariaResult<(
+    Option<String>,
+    Vec<String>,
+    Option<String>,
+    Option<EvalRecallObservation>,
+)> {
+    // 预置上下文（full-context 对照）：外部已拼好全量摘要，跳过检索 / 嵌入 / 检索器读写。
+    // 判定须在空查询早退之前——该管线的固定问题文本可能被判空，不能当作无召回输入。
+    if let Some(preset) = eval.and_then(|options| options.preset_context.as_deref()) {
+        let budget = eval
+            .and_then(|options| options.max_chars)
+            .map(|value| value as usize);
+        let (memory_context, _) = clip_memory(Some(preset.to_string()), None, budget);
+        let observation =
+            eval_observation(&[], RecallTrace::default(), memory_context.as_deref(), None);
+        return Ok((memory_context, Vec::new(), None, Some(observation)));
+    }
+
     // 无检索输入（主动生成的轻触达场景无锚点）：跳过召回，避免空查询触发嵌入调用；
     // 既有对话路径消息非空，行为不变
     if message.trim().is_empty() {
         tracing::debug!(persona = %persona, "查询为空，跳过记忆召回");
-        return Ok((None, Vec::new(), None));
+        return Ok((None, Vec::new(), None, None));
     }
 
     // 索引未就绪时的首问降级：不进构建路径（不改索引状态），用存储直读 BM25 出召回；
@@ -92,7 +124,39 @@ pub(crate) async fn step_recall(
     let keyword_mirror = engine.keyword_mirror();
     // 人格类型按 persona 行显式解析（行缺失 / 读取失败 → None，共用召回内部保守降级）
     let persona_kind = crate::recall::resolve_persona_kind(storage, persona).await;
-    let recall = assemble_recall(RecallInput {
+    // 闸门与分层：产品路径与既有口径一致；评测路径再与层掩码取交集
+    let (gates, memory_layers, as_of_ms, touch) = match eval {
+        Some(options) => {
+            let mask = options.mask;
+            (
+                RecallGates {
+                    memory_rag: config.injection.memory_rag && (mask.l1 || mask.l2),
+                    utt: config.injection.utt
+                        && config.utt.enabled
+                        && policy.allow_raw_text
+                        && mask.utt,
+                },
+                RecallMemoryLayers {
+                    l1: mask.l1,
+                    l2: mask.l2,
+                },
+                options.as_of_ms,
+                options.touch,
+            )
+        }
+        None => (
+            RecallGates {
+                memory_rag: config.injection.memory_rag,
+                utt: config.injection.utt && config.utt.enabled && policy.allow_raw_text,
+            },
+            RecallMemoryLayers::both(),
+            // 在线管线不传查询时钟：衰减基准取 now，且不按未来过滤。
+            None,
+            true,
+        ),
+    };
+
+    let input = RecallInput {
         retriever: &retriever,
         keyword_mirror: &*keyword_mirror,
         storage,
@@ -103,29 +167,117 @@ pub(crate) async fn step_recall(
         retrieval: &config.retrieval,
         decay: &config.decay,
         utt: &config.utt,
-        gates: RecallGates {
-            memory_rag: config.injection.memory_rag,
-            utt: config.injection.utt && config.utt.enabled && policy.allow_raw_text,
-        },
-        memory_layers: RecallMemoryLayers::both(),
+        gates,
+        memory_layers,
         now_ms: now_ms(),
-    })
-    .await;
+        as_of_ms,
+    };
 
-    let memory_context = recall.memory_context;
+    // 轨迹生命周期：先声明再借出，装配结束后由观测接管（产品路径不采集）
+    let mut trace = RecallTrace::default();
+    let traced = eval.is_some();
+    let recall = if traced {
+        assemble_recall_with(
+            input,
+            RecallOptions {
+                trace: Some(&mut trace),
+                touch,
+            },
+        )
+        .await
+    } else {
+        assemble_recall(input).await
+    };
+
+    // 评测预算：记忆上下文优先占用，原文片段用剩余字符；产品路径不截断。
+    let budget = eval
+        .and_then(|options| options.max_chars)
+        .map(|value| value as usize);
+    let RecallOutput {
+        memory_context,
+        utt_context,
+        hits,
+        doc_labels,
+        ..
+    } = recall;
+    let (memory_context, utt_context) = clip_memory(memory_context, utt_context, budget);
+
+    let observation = traced.then(|| {
+        eval_observation(
+            &hits,
+            trace,
+            memory_context.as_deref(),
+            utt_context.as_deref(),
+        )
+    });
+
     // 知识层去重参照：仅当 RAG 摘要真正注入时才消费覆盖集合
     let doc_labels = if memory_context.is_some() {
-        recall.doc_labels
+        doc_labels
     } else {
         Vec::new()
     };
-    Ok((memory_context, doc_labels, recall.utt_context))
+    Ok((memory_context, doc_labels, utt_context, observation))
+}
+
+/// 按总字符预算裁剪记忆上下文与原文片段。
+///
+/// 规则:
+/// - `budget = None` 时不截断，只把空白文本归一为 `None`；
+/// - 记忆上下文先占用预算，截断到边界；原文片段使用剩余预算（不足则为空）；
+/// - 按 Unicode 字符边界截断，不拆分 UTF-8。
+fn clip_memory(
+    memory_context: Option<String>,
+    utt_context: Option<String>,
+    budget: Option<usize>,
+) -> (Option<String>, Option<String>) {
+    let clip = |text: Option<String>| text.filter(|value| !value.trim().is_empty());
+    let Some(budget) = budget else {
+        return (clip(memory_context), clip(utt_context));
+    };
+
+    let memory = clip(memory_context).unwrap_or_default();
+    let memory: String = memory.chars().take(budget).collect();
+    let remaining = budget.saturating_sub(memory.chars().count());
+    let utt = clip(utt_context).unwrap_or_default();
+    let utt: String = utt.chars().take(remaining).collect();
+
+    (
+        (!memory.trim().is_empty()).then_some(memory),
+        (!utt.trim().is_empty()).then_some(utt),
+    )
+}
+
+/// 由召回输出与轨迹组装评测观测（只记分层 / 标识 / 分数与体量，不含记忆原文）。
+fn eval_observation(
+    hits: &[RecallHit],
+    trace: RecallTrace,
+    memory_context: Option<&str>,
+    utt_context: Option<&str>,
+) -> EvalRecallObservation {
+    let text_chars = |text: Option<&str>| text.map_or(0, |value| value.chars().count());
+    let text_tokens = |text: Option<&str>| text.map_or(0, crate::estimate_tokens);
+    EvalRecallObservation {
+        items: hits
+            .iter()
+            .map(|hit| EvalRecallItem {
+                layer: hit.layer.clone(),
+                id: hit.id.clone(),
+                score: hit.score,
+            })
+            .collect(),
+        trace,
+        context_chars: text_chars(memory_context),
+        injected_tokens: text_tokens(memory_context) + text_tokens(utt_context),
+        utt_chars: text_chars(utt_context),
+    }
 }
 
 /// 步骤 8：脉络素材（跨会话近期摘要 + 最后活跃时间）。
 ///
 /// 说明:
 /// - 注入闸门 / 加权检索 / "最近 N 条"回退语义由记忆层单份实现承担；
+/// - 评测掩码关闭脉络层时直接返回空素材（不检索、不读库）；
 /// - 任何降级路径返回空素材而非错误（不阻塞生成）。
 pub(crate) async fn step_load_narrative(
     engine: &Engine,
@@ -133,7 +285,11 @@ pub(crate) async fn step_load_narrative(
     config: &RamariaConfig,
     persona: &str,
     message: &str,
+    eval: Option<&EvalChatOptions>,
 ) -> ramaria_memory::chat::NarrativeMaterial {
+    if eval.is_some_and(|options| !options.mask.narrative) {
+        return ramaria_memory::chat::NarrativeMaterial::default();
+    }
     let retriever = engine.retriever_slot();
     load_narrative_material(
         storage,
@@ -151,7 +307,8 @@ pub(crate) async fn step_load_narrative(
 ///
 /// 说明:
 /// - 路由输入取本轮 prompt 历史（查询构造只用角色与内容）；
-/// - `[injection].behavior` 或 `[behavior].enabled` 关闭时不做任何查询。
+/// - `[injection].behavior` 或 `[behavior].enabled` 关闭时不做任何查询；
+/// - 评测掩码关闭行为层时同样直接返回 None（不读库、不调嵌入）。
 pub(crate) async fn step_route_behavior(
     engine: &Engine,
     storage: &dyn StorageBackend,
@@ -159,7 +316,11 @@ pub(crate) async fn step_route_behavior(
     persona: &str,
     session_id: Uuid,
     history: &[ChatMessage],
+    eval: Option<&EvalChatOptions>,
 ) -> Option<ramaria_memory::behavior::MergedDecision> {
+    if eval.is_some_and(|options| !options.mask.behavior) {
+        return None;
+    }
     if !config.injection.behavior || !config.behavior.enabled {
         return None;
     }
@@ -200,12 +361,19 @@ pub(crate) async fn step_route_behavior(
 }
 
 /// 步骤 10：知识层判定器检索（关闭 / 未命中 / 失败 → 空，不注入知识块）。
+///
+/// 说明:
+/// - 评测掩码关闭知识层时直接返回空集（不调判定器、不读库）。
 pub(crate) async fn step_load_knowledge(
     storage: &dyn StorageBackend,
     config: &RamariaConfig,
     persona: &str,
     message: &str,
+    eval: Option<&EvalChatOptions>,
 ) -> Vec<ramaria_core::types::PersonaFact> {
+    if eval.is_some_and(|options| !options.mask.knowledge) {
+        return Vec::new();
+    }
     if config.injection.knowledge && config.knowledge.auto_fact_detect {
         ramaria_memory::fact::retriever::load_knowledge_facts_for_query(
             storage,
@@ -220,11 +388,18 @@ pub(crate) async fn step_load_knowledge(
 }
 
 /// 步骤 11：示例预选（常驻；注入闸门关闭 → 空）。
+///
+/// 说明:
+/// - 评测掩码关闭示例层时直接返回空集（不读库、不预选）。
 pub(crate) async fn step_load_examples(
     storage: &dyn StorageBackend,
     config: &RamariaConfig,
     persona: &str,
+    eval: Option<&EvalChatOptions>,
 ) -> Vec<ramaria_core::types::PersonaExample> {
+    if eval.is_some_and(|options| !options.mask.examples) {
+        return Vec::new();
+    }
     if config.injection.examples {
         load_examples_for_input(storage, &config.examples, Some(persona)).await
     } else {

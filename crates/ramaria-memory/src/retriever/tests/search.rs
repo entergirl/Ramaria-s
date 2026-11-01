@@ -87,6 +87,7 @@ fn vector_channel_finds_indexed_l1_l2() {
         confidence: 0.9,
         created_at: 2000,
         start: 2000,
+        end: 2000,
         salience: 0.7,
     });
     let label = make_vector_label("l2", &l2_id.to_string());
@@ -155,6 +156,51 @@ fn vector_channel_skipped_without_query_vector() {
         results.iter().all(|sr| sr.vector_score.is_none()),
         "无 query 向量时结果不应携带向量分数"
     );
+}
+
+/// 查询时钟缺省（None）与既有入口逐项一致：候选、分数与顺序都不变。
+#[test]
+fn search_at_none_matches_legacy_search() {
+    let r = make_test_retriever();
+    let req = SearchRequest {
+        query: "Rust".to_string(),
+        persona_uid: None,
+        top_k: 10,
+        filter_share: false,
+    };
+    // 检索结果未实现 PartialEq：按文档标识、分层与三路原始分逐项比对。
+    type ResultKey = (String, String, f64, Option<f64>, Option<f64>, Option<f64>);
+    let fields = |list: &[SearchResult]| -> Vec<ResultKey> {
+        list.iter()
+            .map(|sr| {
+                (
+                    sr.doc_id.to_string(),
+                    sr.layer.clone(),
+                    sr.rrf_score,
+                    sr.bm25_score,
+                    sr.vector_score,
+                    sr.graph_score,
+                )
+            })
+            .collect()
+    };
+
+    let legacy = r.search(&req, None);
+    let clocked = r.search_at(&req, None, None);
+    assert_eq!(
+        fields(&legacy),
+        fields(&clocked),
+        "缺省时钟应与既有入口一致"
+    );
+
+    let (legacy_traced, legacy_trace) = r.search_traced(&req, None, None);
+    let (clocked_traced, clocked_trace) = r.search_traced_at(&req, None, None, None);
+    assert_eq!(
+        fields(&legacy_traced),
+        fields(&clocked_traced),
+        "带轨迹入口的结果同样不变"
+    );
+    assert_eq!(legacy_trace, clocked_trace, "轨迹内容不变");
 }
 
 /// enable_vector=false 时向量通道关闭：文档向量与查询向量高度相似（向量是唯一命中通道）

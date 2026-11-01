@@ -19,9 +19,9 @@ use crate::proactive::{ProactiveDirective, ProactiveOutcome};
 use crate::stream_event::ChatStreamHandle;
 use crate::types::{
     CascadeOutcome, CascadeUntil, ChannelImageOutcome, ChatSendOutcome, ChatSendRequest,
-    ChatStreamRequest, HistoricalIngestRequest, HistoryRequest, HistoryResult, IngestOutcome,
-    IngestRequest, LocalImageSendOutcome, LocalImageSendRequest, RecallRequest, RecallResult,
-    RecallWithTrace, SealOutcome,
+    ChatStreamRequest, EvalChatOptions, EvalChatOutcome, HistoricalIngestRequest, HistoryRequest,
+    HistoryResult, IngestOutcome, IngestRequest, LocalImageSendOutcome, LocalImageSendRequest,
+    RecallRequest, RecallResult, RecallWithTrace, SealOutcome,
 };
 
 use super::Engine;
@@ -45,6 +45,23 @@ impl Engine {
         crate::recall::run(self, req).await
     }
 
+    /// 在指定查询时钟下召回（评测时钟；产品入口不调用）。
+    ///
+    /// 说明:
+    /// - `as_of_ms` 同时作为衰减基准与未来过滤线：L1 取 `occurred_at`、L2 取事件结束时间、
+    ///   知识事实取 `occurred_at`，时间晚于该时钟的单元不进入结果；
+    /// - `None` 时与 [`Engine::recall`] 逐字段一致（衰减基准取当前时间、不按未来过滤）。
+    ///
+    /// 返回:
+    /// - 与 [`Engine::recall`] 同结构的召回结果；错误语义一致。
+    pub async fn recall_at(
+        &self,
+        req: RecallRequest,
+        as_of_ms: Option<i64>,
+    ) -> RamariaResult<RecallResult> {
+        crate::recall::run_at(self, req, as_of_ms).await
+    }
+
     /// 带轨迹召回用例：与 [`Engine::recall`] 同一份实现，额外返回诊断轨迹。
     ///
     /// 说明:
@@ -58,6 +75,23 @@ impl Engine {
         crate::recall::run_traced(self, req).await
     }
 
+    /// 在指定查询时钟下带轨迹召回（评测时钟；产品入口不调用）。
+    ///
+    /// 说明:
+    /// - 与 [`Engine::recall_at`] 同一份实现，额外返回诊断轨迹；被时钟剔除的未来单元
+    ///   在轨迹中记 `future`；
+    /// - `None` 时与 [`Engine::recall_with_trace`] 逐字段一致。
+    ///
+    /// 返回:
+    /// - 召回结果与分阶段轨迹；错误语义与 [`Engine::recall_with_trace`] 一致。
+    pub async fn recall_with_trace_at(
+        &self,
+        req: RecallRequest,
+        as_of_ms: Option<i64>,
+    ) -> RamariaResult<RecallWithTrace> {
+        crate::recall::run_traced_at(self, req, as_of_ms).await
+    }
+
     /// 生成用例：以指定人格回复一条消息（记忆检索 + 五段式装配 + LLM）。
     ///
     /// 职责:
@@ -68,6 +102,25 @@ impl Engine {
     /// - 成功时返回 `reply` / `session_id` / `chars`。
     pub async fn chat_send(&self, req: ChatSendRequest) -> RamariaResult<ChatSendOutcome> {
         crate::chat::run(self, req).await
+    }
+
+    /// 评测生成用例：在可控注入层与查询时钟下走同一份生成链路。
+    ///
+    /// 说明:
+    /// - 与 [`Engine::chat_send`] 共用前置编排 / Prompt 装配 / Token 预算 / 落库实现，
+    ///   差异只在选项：层掩码收窄注入面、`as_of_ms` 作为衰减基准与未来过滤线、
+    ///   `touch=false`（默认）时不刷新 L1 访问时间，保证条件间与续跑可复现；
+    /// - 返回值附召回观测（分层 / 标识 / 分数 / 预算 / token），不含记忆原文；
+    /// - 产品入口不调用本用例：生成路径不采集轨迹、不暴露观测。
+    ///
+    /// 返回:
+    /// - 成功时返回回复 / 会话 / 字符数与召回观测；错误语义与 [`Engine::chat_send`] 一致。
+    pub async fn chat_answer_eval(
+        &self,
+        req: ChatSendRequest,
+        options: EvalChatOptions,
+    ) -> RamariaResult<EvalChatOutcome> {
+        crate::chat::answer_eval(self, req, options).await
     }
 
     /// 主动生成用例：为指定人格生成一条主动消息（非流式、assistant-only）。

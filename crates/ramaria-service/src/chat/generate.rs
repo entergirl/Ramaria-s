@@ -1,7 +1,8 @@
 //! crates/ramaria-service/src/chat/generate.rs - Ramaria 生成用例入口与生成侧实现
 //!
 //! 设计特点:
-//! - 用例入口：非流式 `run`（通道入口）与流式 `stream`（交互入口）共用 `prepare_request` 前置编排
+//! - 用例入口：非流式 `run`（通道入口）、评测 `answer_eval` 与流式 `stream`（交互入口）
+//!   共用 `prepare_request` 前置编排
 //! - 失败不留半条：非流式仅在 LLM 成功后落库；流式在前置编排即落用户消息，
 //!   助手回复仅在无错且非空时落库
 //! - 流打不开：返回只含一个 `Error` 事件的事件流句柄（用户消息已由前置编排落库，
@@ -26,7 +27,9 @@ use ramaria_memory::chat::SegmentStyle;
 
 use crate::engine::Engine;
 use crate::stream_event::{ChatStreamHandle, StreamEvent};
-use crate::types::{ChatSendOutcome, ChatSendRequest, ChatStreamRequest};
+use crate::types::{
+    ChatSendOutcome, ChatSendRequest, ChatStreamRequest, EvalChatOptions, EvalChatOutcome,
+};
 
 use super::steps::{ChatInput, ChatMode, prepare_request};
 use steps::{forward_and_persist, step_call_llm, step_open_stream, step_persist_reply};
@@ -74,7 +77,7 @@ pub(crate) async fn run(engine: &Engine, req: ChatSendRequest) -> RamariaResult<
         proactive: None,
     };
 
-    let prepared = prepare_request(engine, &input, config.as_ref()).await?;
+    let prepared = prepare_request(engine, &input, config.as_ref(), None).await?;
     tracing::info!(
         request_id = %prepared.request_id,
         session_id = %prepared.session_id,
@@ -108,6 +111,76 @@ pub(crate) async fn run(engine: &Engine, req: ChatSendRequest) -> RamariaResult<
         reply,
         session_id: prepared.session_id,
         chars: reply_chars,
+    })
+}
+
+/// 执行评测生成用例：可控注入层与查询时钟的同一份生成链路。
+///
+/// 流程:
+/// - 前置编排与 `run` 同源（参数校验 / 会话定位 / 历史窗口 / 召回 / Prompt / 预算）；
+///   差异只在评测选项：层掩码收窄注入面、查询时钟替代当前时间、默认不刷新访问时间；
+/// - 生成侧与 `run` 同源：LLM 成功后落库用户消息与助手回复，失败不落库。
+///
+/// 参数:
+/// - `engine`: 服务层引擎。
+/// - `req`: 生成请求（与 `chat_send` 同一结构）。
+/// - `options`: 评测选项（查询时钟 / 层掩码 / 访问时间刷新 / 预置上下文）。
+///
+/// 返回:
+/// - 成功时返回回复、会话与召回观测；召回缺席（空查询等）时观测为空结构，不 panic。
+pub(crate) async fn answer_eval(
+    engine: &Engine,
+    req: ChatSendRequest,
+    options: EvalChatOptions,
+) -> RamariaResult<EvalChatOutcome> {
+    let config = engine.config();
+    let input = ChatInput {
+        message: req.message,
+        persona: req.persona,
+        session_id: req.session_id,
+        mode: ChatMode::Channel,
+        channel: req.channel,
+        conversation_id: req.conversation_id,
+        seed_history: Vec::new(),
+        message_in_history: false,
+        segment_style: SegmentStyle::Pipe,
+        proactive: None,
+    };
+
+    let prepared = prepare_request(engine, &input, config.as_ref(), Some(&options)).await?;
+    tracing::info!(
+        request_id = %prepared.request_id,
+        session_id = %prepared.session_id,
+        persona = %prepared.persona,
+        input_chars = prepared.message.chars().count(),
+        "评测生成开始（记忆检索与 Prompt 装配完成）"
+    );
+
+    // ---- 非流式：LLM 生成（失败不落库，与产品入口同一纪律） ----
+    let reply = step_call_llm(engine, &prepared.chat_request, prepared.session_id).await?;
+
+    let storage = engine.storage_ref().as_ref();
+    let chars = step_persist_reply(
+        storage,
+        prepared.session_id,
+        &prepared.persona,
+        &prepared.message,
+        &reply,
+    )
+    .await?;
+
+    tracing::info!(
+        session_id = %prepared.session_id,
+        persona = %prepared.persona,
+        reply_chars = chars,
+        "评测生成完成（消息已落库）"
+    );
+
+    Ok(EvalChatOutcome {
+        reply,
+        session_id: prepared.session_id,
+        chars,
+        recall: prepared.recall.unwrap_or_default(),
     })
 }
 
@@ -148,7 +221,7 @@ pub(crate) async fn stream(
         proactive: None,
     };
 
-    let prepared = prepare_request(engine.as_ref(), &input, config.as_ref()).await?;
+    let prepared = prepare_request(engine.as_ref(), &input, config.as_ref(), None).await?;
     let session_id = prepared.session_id;
     let request_id = prepared.request_id;
     tracing::info!(

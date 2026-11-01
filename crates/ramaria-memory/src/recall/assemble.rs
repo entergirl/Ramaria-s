@@ -2,7 +2,8 @@
 //!
 //! 设计特点:
 //! - 单份实现：检索 → 子层过滤 → 衰减重排 → Persona-Aware 过滤 → 段落与 utt 渲染
-//! - 锁纪律：std 读锁只覆盖同步内存检索；embedding 生成与 touch_l1 在锁外 await
+//! - 锁纪律：std 读锁只覆盖同步内存检索；embedding 生成与 touch_l1 在锁外 await，
+//!   touch 可按装配选项关闭（评测口径）
 //! - 静默降级：嵌入 / 镜像 / 索引任一缺席都返回结构完整的空输出
 //! - 关向量零调用：`[retrieval].enable_vector = false` 时不生成任何查询 / 词条嵌入，
 //!   utt 向量通道随 `query_vec = None` 退化为 BM25 子串口径
@@ -59,13 +60,14 @@ pub async fn assemble_recall<R: RetrieverSource + ?Sized, K: KeywordMirrorSource
 /// 3. 关键词镜像预取：锁内取快照 → 锁外异步查询 → 纯 `(label, score)` 交检索融合；
 /// 4. 多通道检索（读锁内同步）：BM25 + 向量 + 图谱 + 关键词镜像，RRF 融合；
 /// 5. 记忆子层过滤：按 `memory_layers` 剔除未请求的 L1 / L2 文档（图谱实体跟随 `l2`；两层全开 = 无操作）；
-/// 6. 时间衰减（含访问加成）→ touch_l1 刷新访问时间 → 按衰减后分数重排；
+/// 6. 时间衰减（含访问加成）→ 按 `options.touch` 决定是否 touch_l1 刷新访问时间 → 按衰减后分数重排；
 /// 7. Persona-Aware 过滤（阈值取显式载体 `persona_kind`）→ 段落渲染（`[相关记忆]`）→ 覆盖集合记录；
 /// 8. utt 原文检索与预算渲染（白名单内且闸门开启）。
 ///
 /// 参数:
 /// - `input`: 召回输入（依赖句柄 + 生效配置 + 闸门 + 时间基准）；
-/// - `options`: 装配选项；`trace` 为 `Some` 时按阶段写入轨迹，为 `None` 时与 `assemble_recall` 等价。
+/// - `options`: 装配选项；`trace` 为 `Some` 时按阶段写入轨迹，为 `None` 时与 `assemble_recall` 等价；
+///   `touch` 为 `false` 时不刷新命中 L1 的访问时间（不写库、不改动本次排序与分数）。
 ///
 /// 返回:
 /// - 召回输出；任何降级路径都返回结构完整的输出而非错误（调用方按空值处理）。
@@ -80,6 +82,10 @@ pub async fn assemble_recall_with<R: RetrieverSource + ?Sized, K: KeywordMirrorS
 ) -> RecallOutput {
     let mut trace = options.trace;
     let mut output = RecallOutput::default();
+
+    // 查询时钟：评测传 as_of 时同时作为衰减基准与未来过滤线；产品路径回退到 now_ms。
+    let clock = input.as_of_ms.unwrap_or(input.now_ms);
+    let as_of_ms = input.as_of_ms;
 
     // ---- 0. 轨迹：查询长度与本次生效的条数预算 ----
     // 条数上限与是否有命中无关，先写入，避免空召回时被读成"预算为零"。
@@ -213,23 +219,20 @@ pub async fn assemble_recall_with<R: RetrieverSource + ?Sized, K: KeywordMirrorS
                 filter_share: true,
             };
             if trace_retrieval {
-                let (results, retrieval) = retriever.search_traced(
+                let (results, retrieval) = retriever.search_traced_at(
                     &request,
                     query_vec_snapshot.as_deref(),
                     keyword_for_search,
+                    as_of_ms,
                 );
                 (results, Some(retrieval))
             } else {
-                let results = match (query_vec_snapshot.as_deref(), keyword_for_search) {
-                    (Some(qv), Some(hits)) => {
-                        retriever.search_with_keyword_hits(&request, Some(qv), Some(hits))
-                    }
-                    (Some(qv), None) => retriever.search(&request, Some(qv)),
-                    (None, Some(hits)) => {
-                        retriever.search_with_keyword_hits(&request, None, Some(hits))
-                    }
-                    (None, None) => retriever.search(&request, None),
-                };
+                let results = retriever.search_with_keyword_hits_at(
+                    &request,
+                    query_vec_snapshot.as_deref(),
+                    keyword_for_search,
+                    as_of_ms,
+                );
                 (results, None)
             }
         } else {
@@ -322,7 +325,7 @@ pub async fn assemble_recall_with<R: RetrieverSource + ?Sized, K: KeywordMirrorS
             let decay_factor = calc_retention(
                 r.created_at,
                 r.last_accessed_at,
-                input.now_ms,
+                clock,
                 salience,
                 decay_config,
             );
@@ -358,9 +361,11 @@ pub async fn assemble_recall_with<R: RetrieverSource + ?Sized, K: KeywordMirrorS
         // ---- 5.1 touch 接线：检索命中更新 last_accessed_at ----
         // 异步更新不阻塞检索：失败仅 warn（本次降级为无访问加成），
         // 成功使近期被检索的 L1 在下次检索中获得保底保留率（recent_boost_floor）。
-        if !touched_l1_ids.is_empty() {
+        // 评测口径关闭 touch：不写库，后续召回看到同一份访问时间（条件间可复现）。
+        if options.touch && !touched_l1_ids.is_empty() {
             let ids_for_touch = touched_l1_ids;
-            if let Err(e) = input.storage.touch_l1(&ids_for_touch, input.now_ms).await {
+            // 访问时间按查询时钟写入：评测时钟不应把访问时间写到未来。
+            if let Err(e) = input.storage.touch_l1(&ids_for_touch, clock).await {
                 tracing::warn!(
                     count = ids_for_touch.len(),
                     error = %e,

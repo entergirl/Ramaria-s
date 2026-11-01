@@ -30,11 +30,11 @@ use ramaria_core::traits::{ChatMessage, ChatRequest};
 use ramaria_core::types::{
     Message, MessageRole, MessageSource, Session, is_social_channel, new_id,
 };
-use ramaria_memory::chat::{PromptMaterialInputs, SegmentStyle};
+use ramaria_memory::chat::{MaterialLoadMask, PromptMaterialInputs, SegmentStyle};
 use uuid::Uuid;
 
 use crate::engine::Engine;
-use crate::types::DEFAULT_PERSONA_UID;
+use crate::types::{DEFAULT_PERSONA_UID, EvalChatOptions, EvalRecallObservation};
 
 use super::context::{
     step_apply_token_budget, step_build_prompt, step_build_request, step_load_examples,
@@ -116,6 +116,8 @@ pub(super) struct PreparedRequest {
     /// 用户消息是否已在前置编排中落库（交互式入口为 true）。
     pub(super) user_persisted: bool,
     pub(super) chat_request: ChatRequest,
+    /// 评测召回观测（产品入口为 None；评测入口缺失时为 None，由调用方回填空观测）。
+    pub(super) recall: Option<EvalRecallObservation>,
 }
 
 // =========================================================
@@ -130,7 +132,7 @@ pub(super) struct PreparedRequest {
 /// 3. 后端配置快照 + 交互式：线上 provider 隐私确认（主动模式由调用方预检）；
 /// 4. 会话定位（交互式 / 通道式 / 主动模式三种语义）；
 /// 5. 历史窗口加载（配置驱动 + 预置上文前置），交互式随后先落库用户消息（首条消息不阻塞）；
-/// 6. 记忆召回（配置闸门 × 宿主策略）；
+/// 6. 记忆召回（配置闸门 × 宿主策略 × 评测层掩码）；
 /// 7. 交互式：弱反馈检测；
 /// 8. 脉络素材；
 /// 9. 行为层情境路由；
@@ -139,10 +141,15 @@ pub(super) struct PreparedRequest {
 /// 12. 系统 Prompt 装配（普通 / 协调预算路径）；
 /// 13. Token 预算裁剪与 `ChatRequest` 构建（主动模式用户消息位留空；
 ///     思考适配按 `[backend]` 配置注入思考开关 / 角色沉浸 / 对话温度）。
+///
+/// 参数:
+/// - `eval`: 评测选项（层掩码 / 查询时钟 / 访问时间刷新 / 预置上下文）；产品三个入口传 `None`，
+///   装配结果与不传时逐字段一致。
 pub(super) async fn prepare_request(
     engine: &Engine,
     input: &ChatInput,
     config: &RamariaConfig,
+    eval: Option<&EvalChatOptions>,
 ) -> RamariaResult<PreparedRequest> {
     let storage = engine.storage_ref().as_ref();
 
@@ -194,9 +201,9 @@ pub(super) async fn prepare_request(
         false
     };
 
-    // ---- 6. 记忆召回（配置闸门 × 宿主策略） ----
-    let (memory_context, rag_covered_labels, utt_context) =
-        step_recall(engine, storage, config, &persona, message).await?;
+    // ---- 6. 记忆召回（配置闸门 × 宿主策略 × 评测层掩码） ----
+    let (memory_context, rag_covered_labels, utt_context, recall_observation) =
+        step_recall(engine, storage, config, &persona, message, eval).await?;
 
     // ---- 7. 弱反馈检测（交互式；失败只 warn） ----
     if input.mode == ChatMode::Interactive {
@@ -212,19 +219,32 @@ pub(super) async fn prepare_request(
     }
 
     // ---- 8. 脉络素材（跨会话近期摘要 + 最后活跃时间） ----
-    let narrative = step_load_narrative(engine, storage, config, &persona, message).await;
+    let narrative = step_load_narrative(engine, storage, config, &persona, message, eval).await;
 
     // ---- 9. 行为层情境路由（关闭 / 未命中 / 失败 → 不注入行为块） ----
-    let behavior_decision =
-        step_route_behavior(engine, storage, config, &persona, session_id, &history).await;
+    let behavior_decision = step_route_behavior(
+        engine, storage, config, &persona, session_id, &history, eval,
+    )
+    .await;
 
     // ---- 10. 知识层判定器检索（关闭 / 未命中 / 失败 → 空，不注入知识块） ----
-    let knowledge_facts = step_load_knowledge(storage, config, &persona, message).await;
+    let knowledge_facts = step_load_knowledge(storage, config, &persona, message, eval).await;
 
     // ---- 11. 示例预选（常驻；注入闸门关闭 → 空） ----
-    let examples = step_load_examples(storage, config, &persona).await;
+    let examples = step_load_examples(storage, config, &persona, eval).await;
 
     // ---- 12. 系统 Prompt 装配（协调路径可能裁剪 / 丢弃 RAG，以结果回写记忆上下文） ----
+    // 素材层掩码：评测按知识 / L3 / 表达掩码关层，产品路径默认全开；
+    // 表达层沿用 `style_enabled` 原逻辑，只在评测关闭 style 时收缩。
+    let material = match eval {
+        Some(options) => MaterialLoadMask {
+            facts: options.mask.knowledge,
+            traits: options.mask.l3,
+            plain_fallback: options.mask.l3,
+        },
+        None => MaterialLoadMask::default(),
+    };
+    let style_enabled = config.style.enabled && eval.is_none_or(|options| options.mask.style);
     let inputs = PromptMaterialInputs {
         persona_uid: Some(&persona),
         recent_summaries: &narrative.recent_summaries,
@@ -238,7 +258,7 @@ pub(super) async fn prepare_request(
         rag_covered_labels: &rag_covered_labels,
         knowledge_budget_chars: Some(config.knowledge.injection_budget_chars),
         injection: &config.injection,
-        style_enabled: config.style.enabled,
+        style_enabled,
         rag_text: memory_context.as_deref(),
         layer_dedup: &config.layer_dedup,
         segment_style: input.segment_style,
@@ -252,6 +272,7 @@ pub(super) async fn prepare_request(
         } else {
             None
         },
+        material,
     };
     let (system_prompt, memory_context) =
         step_build_prompt(storage, config, &inputs, memory_context.clone()).await;
@@ -289,6 +310,7 @@ pub(super) async fn prepare_request(
         message: message.to_string(),
         user_persisted,
         chat_request,
+        recall: recall_observation,
     })
 }
 pub(super) fn normalize_persona(persona: Option<&str>) -> String {

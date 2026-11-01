@@ -23,7 +23,10 @@ mod qrels;
 mod tier;
 
 pub use config::{EVAL_CONFIG_RELATIVE_PATH, MemoryConfig};
-pub use manifest::Counts;
+pub use manifest::{
+    ARTIFACT_KIND, ARTIFACT_SCHEMA_VERSION, BaselineManifest, Counts, MANIFEST_FILE,
+};
+pub use qrels::{QRELS_FILE, QrelsRow};
 pub use tier::{TIER_IDS, TierSelection, TierSpec, parse_tier};
 
 /// 建库流水线版本（参与代码指纹）。

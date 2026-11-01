@@ -151,7 +151,7 @@ pub(crate) async fn run(
             tone,
         }),
     };
-    let prepared = prepare_request(engine, &input, config.as_ref()).await?;
+    let prepared = prepare_request(engine, &input, config.as_ref(), None).await?;
 
     // ---- 7. LLM 生成（非流式；失败上抛且不落库） ----
     let llm = engine.llm_ref();

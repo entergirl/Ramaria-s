@@ -359,6 +359,7 @@ fn drop_reason_name(reason: DropReason) -> &'static str {
         DropReason::MaxMemories => "max_memories",
         DropReason::DocMissing => "doc_missing",
         DropReason::PersonaMismatch => "persona_mismatch",
+        DropReason::Future => "future",
     }
 }
 

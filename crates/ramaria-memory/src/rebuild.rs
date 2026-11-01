@@ -300,6 +300,7 @@ pub fn events_to_views(events: &[ramaria_core::MemoryEvent]) -> Vec<L2DocView> {
             confidence: ev.confidence,
             created_at: ev.created_at,
             start: ev.start,
+            end: ev.end,
             salience: ev.salience,
         })
         .collect()
@@ -341,6 +342,7 @@ mod tests {
             confidence: 0.8,
             created_at: 1000,
             start: 1000,
+            end: 1000,
             salience: 0.6,
         }
     }

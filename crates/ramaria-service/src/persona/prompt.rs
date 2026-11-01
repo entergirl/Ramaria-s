@@ -10,7 +10,7 @@ use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::traits::ChatMessage;
 use ramaria_core::types::MessageRole;
 use ramaria_memory::chat::{
-    PromptMaterialInputs, RecentStateConfig, SegmentStyle, build_system_prompt,
+    MaterialLoadMask, PromptMaterialInputs, RecentStateConfig, SegmentStyle, build_system_prompt,
 };
 use ramaria_memory::prompt::builder::measure_prompt_volume;
 use uuid::Uuid;
@@ -80,25 +80,33 @@ pub(crate) async fn preview(
                     window_days: config.proactive.recent_state_window_days,
                 },
                 proactive: None,
+                material: MaterialLoadMask::default(),
             };
             let system_prompt = build_system_prompt(storage, &inputs).await;
             (PromptPreviewTier::Static, system_prompt, None)
         }
         Some(message) => {
             // 全量预览：与生成前置步骤 6~12 同源（召回 → 脉络 → 行为 → 知识 → 示例 → 装配）
-            let (memory_context, rag_covered_labels, utt_context) =
-                step_recall(engine, storage, &config, uid, message).await?;
-            let narrative = step_load_narrative(engine, storage, &config, uid, message).await;
+            let (memory_context, rag_covered_labels, utt_context, _) =
+                step_recall(engine, storage, &config, uid, message, None).await?;
+            let narrative = step_load_narrative(engine, storage, &config, uid, message, None).await;
             // 预览无会话历史：以「给定输入」充当路由查询输入，会话位仅作消息元数据
             let route_messages = vec![ChatMessage {
                 role: MessageRole::User,
                 content: message.to_string(),
             }];
-            let behavior_decision =
-                step_route_behavior(engine, storage, &config, uid, Uuid::nil(), &route_messages)
-                    .await;
-            let knowledge_facts = step_load_knowledge(storage, &config, uid, message).await;
-            let examples = step_load_examples(storage, &config, uid).await;
+            let behavior_decision = step_route_behavior(
+                engine,
+                storage,
+                &config,
+                uid,
+                Uuid::nil(),
+                &route_messages,
+                None,
+            )
+            .await;
+            let knowledge_facts = step_load_knowledge(storage, &config, uid, message, None).await;
+            let examples = step_load_examples(storage, &config, uid, None).await;
 
             let inputs = PromptMaterialInputs {
                 persona_uid: Some(uid),
@@ -123,6 +131,7 @@ pub(crate) async fn preview(
                     window_days: config.proactive.recent_state_window_days,
                 },
                 proactive: None,
+                material: MaterialLoadMask::default(),
             };
             let (system_prompt, memory_context) =
                 step_build_prompt(storage, &config, &inputs, memory_context.clone()).await;

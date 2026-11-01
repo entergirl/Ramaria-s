@@ -23,7 +23,7 @@ mod tests;
 pub use examples::load_examples_for_input;
 pub use material::{
     CHANNEL_GROUP_DECLARATION, CHANNEL_SEGMENT_DECLARATION, CHANNEL_STICKER_DECLARATION,
-    LoadedPromptMaterial, PromptMaterialInputs, RecentStateConfig, SegmentStyle,
+    LoadedPromptMaterial, MaterialLoadMask, PromptMaterialInputs, RecentStateConfig, SegmentStyle,
     build_system_prompt, load_prompt_material,
 };
 pub use narrative::{NarrativeMaterial, format_l1_as_context_line, load_narrative_material};

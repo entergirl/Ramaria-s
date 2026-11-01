@@ -66,6 +66,7 @@ fn l2_view(id: i64, persona: &str, keywords: Option<&str>) -> L2DocView {
         confidence: 0.7,
         created_at: NOW_MS,
         start: NOW_MS,
+        end: NOW_MS,
         salience: 0.6,
     }
 }

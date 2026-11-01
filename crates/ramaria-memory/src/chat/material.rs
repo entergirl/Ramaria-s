@@ -114,6 +114,34 @@ impl Default for RecentStateConfig {
     }
 }
 
+/// 素材加载层掩码（按层关闭 persona 侧素材，评测消融专用）。
+///
+/// 字段约定:
+/// - `facts`: 是否加载角色层「关于对方」事实；
+/// - `traits`: 是否加载性格标签；
+/// - `plain_fallback`: facts 与 traits 均为空时是否回退 persona.toml 纯文本 prompt。
+///
+/// 说明:
+/// - 默认三项全开，与产品路径逐字段一致；
+/// - 关闭只影响加载与冷启动回退判定：不查库、取空集，渲染路径不变（空集由 builder 省略对应段）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaterialLoadMask {
+    pub facts: bool,
+    pub traits: bool,
+    pub plain_fallback: bool,
+}
+
+impl Default for MaterialLoadMask {
+    /// 默认全开（产品口径：按 persona 结构化画像装配）。
+    fn default() -> Self {
+        Self {
+            facts: true,
+            traits: true,
+            plain_fallback: true,
+        }
+    }
+}
+
 /// System Prompt 装配素材加载的完整输入集合。
 ///
 /// 职责:
@@ -149,6 +177,7 @@ impl Default for RecentStateConfig {
 ///   即时通讯平台通道，回复规则后追加通道声明段）。
 /// - `group_conversation`: 社交通道群聊标记（`Newline` 且为群聊时追加群聊说明段）。
 /// - `recent_state`: 近期状态消费配置（开关关闭时不查询、不注入）。
+/// - `material`: 素材加载层掩码（关闭的层不查库、取空集；默认全开）。
 pub struct PromptMaterialInputs<'a> {
     /// 人格标识（None 表示 rama 自身）。
     pub persona_uid: Option<&'a str>,
@@ -188,6 +217,8 @@ pub struct PromptMaterialInputs<'a> {
     pub recent_state: RecentStateConfig,
     /// 主动生成场景上下文（None = 非主动生成，Prompt 不产生主动段）。
     pub proactive: Option<ProactivePromptContext>,
+    /// 素材加载层掩码（默认全开）。
+    pub material: MaterialLoadMask,
 }
 
 // =========================================================
@@ -197,11 +228,12 @@ pub struct PromptMaterialInputs<'a> {
 /// 加载 System Prompt 装配素材（普通 / 协调装配共享）。
 ///
 /// 流程:
-/// 1. 从 storage 加载当前 persona 的数据（persona/facts/traits/examples）。
+/// 1. 从 storage 加载当前 persona 的数据（persona/facts/traits/examples）；
+///    facts / traits 受 `inputs.material` 掩码控制，关闭时不查库、取空集。
 /// 2. 注入近期 L1 摘要（跨 session 上下文）和最后活跃时间。
 /// 3. 返回结构化上下文（`Structured`）或纯文本降级（`Plain`）。
 ///    - 无 persona → `Plain`（默认 Ramaria prompt）。
-///    - persona 存在但 facts/traits 均为空且 persona.toml 可用 → `Plain`（冷启动）。
+///    - persona 存在但 facts/traits 均为空、掩码允许且 persona.toml 可用 → `Plain`（冷启动）。
 ///    - 其余 → `Structured(ctx, config)`（由调用方选择普通/协调装配）。
 ///
 /// 参数:
@@ -238,22 +270,31 @@ pub async fn load_prompt_material(
 
     // 有 persona 数据时使用 5-Block 装配器
     if let Some(ref p) = persona {
-        // 加载关联数据（各独立调用，失败单独降级）
-        let facts = storage
-            .list_facts_by_persona(&p.uid, ProfileField::BasicInfo)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(persona_uid = %p.uid, %e, "加载 facts 失败，跳过");
-                Vec::new()
-            });
+        // 加载关联数据（各独立调用，失败单独降级）；
+        // 素材层掩码关闭时不查库、直接取空集（渲染路径不变）
+        let facts = if inputs.material.facts {
+            storage
+                .list_facts_by_persona(&p.uid, ProfileField::BasicInfo)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(persona_uid = %p.uid, %e, "加载 facts 失败，跳过");
+                    Vec::new()
+                })
+        } else {
+            Vec::new()
+        };
 
-        let traits = storage
-            .list_traits_by_persona(&p.uid)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(persona_uid = %p.uid, %e, "加载 traits 失败，跳过");
-                Vec::new()
-            });
+        let traits = if inputs.material.traits {
+            storage
+                .list_traits_by_persona(&p.uid)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(persona_uid = %p.uid, %e, "加载 traits 失败，跳过");
+                    Vec::new()
+                })
+        } else {
+            Vec::new()
+        };
 
         // 自动风格规则（表达层）：仅 [style].enabled 且注入闸门开启时加载
         // （探针消融关闭表达层时跳过加载）；
@@ -281,8 +322,9 @@ pub async fn load_prompt_material(
         // 注入侧按话题/情绪/长度评分轮换，并在记忆检索未命中时作风格兜底。
 
         // 冷启动兜底：facts/traits 均为空时，尝试加载 persona.toml
-        // 优先从 DB persona.config 读取，其次回退到文件系统
-        if facts.is_empty() && traits.is_empty() {
+        // 优先从 DB persona.config 读取，其次回退到文件系统；
+        // 掩码关闭该回退时保持结构化装配（空集段由 builder 省略）
+        if inputs.material.plain_fallback && facts.is_empty() && traits.is_empty() {
             if let Some(prompt) = load_persona_toml_prompt(p.config.as_deref()) {
                 tracing::info!("使用 persona.toml 加载的系统 prompt（无结构化画像）");
                 return LoadedPromptMaterial::Plain(prompt);

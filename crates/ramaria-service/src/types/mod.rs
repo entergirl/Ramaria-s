@@ -13,6 +13,7 @@ mod cascade;
 mod channel;
 mod chat;
 mod defaults;
+mod eval;
 mod facts;
 mod index;
 mod ingest;
@@ -35,6 +36,9 @@ pub use chat::{
 pub use defaults::{
     CHANNEL_MCP, DEFAULT_HISTORY_LIMIT, DEFAULT_MAX_CHARS, DEFAULT_MAX_ITEMS, DEFAULT_PERSONA_UID,
     MAX_ITEMS_LIMIT,
+};
+pub use eval::{
+    EvalChatOptions, EvalChatOutcome, EvalInjectionMask, EvalRecallItem, EvalRecallObservation,
 };
 pub use facts::{
     FactBrowsePage, FactBrowseRequest, FactDetailView, FactEntryView, GroupedFactsView,
