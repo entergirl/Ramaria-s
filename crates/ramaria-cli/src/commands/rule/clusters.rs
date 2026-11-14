@@ -52,8 +52,7 @@ pub(crate) const MAX_SIMILARITY_PAIRS: usize = 500_000;
 /// - 追加 `pipeline`：复刻真实管线的 θ_nb 重试口径并逐簇过质控闸门，估算规则产出量。
 /// - 追加 `incremental`（可选）：θ_join 时序增量模拟（前段建簇为模板规则，后段逐条喂入增量管线，
 ///   输出各档位归簇率/待定/新簇/一致性对照）；未传 `--theta-join` 时为 null。
-// 参数为只读统计命令的完整输入集合（含输出模式与模拟档位透传），逐一显式传递保持可读性；
-// 与 probe run 的 `run_experiment` 采用同一 allow 约定。
+// 参数为只读统计命令的完整输入集合（含输出模式与模拟档位透传），逐一显式传递保持可读性。
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_clusters(
     engine: &Arc<Engine>,

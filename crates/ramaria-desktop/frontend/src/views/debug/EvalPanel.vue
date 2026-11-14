@@ -7,8 +7,8 @@
  *
  * 设计特点:
  * - 全程只读：目录由原生对话框授权，选择动作本身即授权
- * - 摘要只取元信息、档位聚合分数与辅助指标；题面、参考答案与模型回复不渲染
- * - 评测报告在档位得分之上先给结论行：编号、状态徽标与一句话
+ * - 摘要只取元信息、条件聚合分数与辅助指标；题面、参考答案与模型回复不渲染
+ * - 评测报告在条件得分之上先给结论行：编号、状态徽标与一句话
  * - 文件行以按钮承载，键盘可达；打开后由「返回文件列表」回到目录视图
  * - 目录未选择与目录为空共用空态，后者补一行说明
  */
@@ -17,8 +17,8 @@ import { computed } from 'vue'
 
 import type { EvalFile } from '../../core/api/dto'
 import { evalFileMeta, ratioLabel, scoreLabel } from '../../core/debug/format'
-import { ARTIFACT_KIND_LABELS, HYPOTHESIS_STATUS_LABELS } from '../../core/debug/probe'
-import type { ArtifactAuxMetric } from '../../core/debug/probe'
+import { ARTIFACT_KIND_LABELS, HYPOTHESIS_STATUS_LABELS } from '../../core/debug/eval'
+import type { ArtifactAuxMetric } from '../../core/debug/eval'
 import BaseTag from '../../components/base/BaseTag.vue'
 import type { ArtifactView } from './useDebugView'
 import DebugStat from './DebugStat.vue'
@@ -45,20 +45,10 @@ const judgeLabel = computed(() => {
   if (used === null || used === undefined) {
     return '未标注'
   }
-  return used ? '已使用' : '未使用'
+  return used ? '已配置' : '未配置'
 })
 
-const personaLabel = computed(() => summary.value?.meta.personaUid ?? '未标注')
-
 const hypotheses = computed(() => summary.value?.hypotheses ?? [])
-
-const variantCountLabel = computed(() =>
-  summary.value?.kind === 'eval_report' ? '条件数' : '档位数',
-)
-
-const scoreBlockTitle = computed(() =>
-  summary.value?.kind === 'eval_report' ? '条件得分' : '档位得分',
-)
 
 /** 计数类辅助指标直接写数值，比例类转百分比 */
 function auxText(metric: ArtifactAuxMetric): string {
@@ -95,13 +85,12 @@ function hypothesisTone(status: string): 'ok' | 'warn' | 'neutral' {
 
       <div class="stats">
         <DebugStat label="产物类型" :value="kindLabel" />
-        <DebugStat label="人格" :value="personaLabel" />
-        <DebugStat label="语气判据" :value="judgeLabel" />
-        <DebugStat :label="variantCountLabel" :value="summary.variants.length" />
+        <DebugStat label="判分模型" :value="judgeLabel" />
+        <DebugStat label="条件数" :value="summary.variants.length" />
       </div>
 
       <p v-if="!summary.hasContent" class="note">
-        无法从该文件识别出评估结构，可能是其它 JSON 产物。
+        无法从该文件识别出评测报告结构，可能不是 `ramaria eval report` 的产物。
       </p>
 
       <section v-if="hypotheses.length > 0" class="block">
@@ -126,11 +115,10 @@ function hypothesisTone(status: string): 'ok' | 'warn' | 'neutral' {
       </section>
 
       <section v-if="summary.variants.length > 0" class="block">
-        <h3 class="block-title">{{ scoreBlockTitle }}</h3>
+        <h3 class="block-title">条件得分</h3>
         <article v-for="variant in summary.variants" :key="variant.name" class="variant">
           <header class="variant-head">
             <code class="variant-name">{{ variant.name }}</code>
-            <span v-if="variant.ablation" class="variant-ablation">{{ variant.ablation }}</span>
           </header>
           <p v-if="variant.gateText" class="variant-gate">{{ variant.gateText }}</p>
           <div v-if="variant.scores.length > 0" class="scores">
@@ -424,15 +412,6 @@ function hypothesisTone(status: string): 'ok' | 'warn' | 'neutral' {
   font-family: var(--font-mono);
   font-size: var(--fs-small);
   font-weight: var(--fw-semibold);
-}
-
-.variant-ablation {
-  padding: 1px var(--space-6);
-  border: 1px solid var(--accent-line);
-  border-radius: var(--radius-tag);
-  background: var(--accent-surface);
-  color: var(--accent-text);
-  font-size: var(--fs-caption);
 }
 
 .variant-gate {

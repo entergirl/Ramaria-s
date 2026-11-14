@@ -24,7 +24,7 @@ import type {
   StyleStats,
 } from '../../core/api/dto'
 import { buildStyleModel, type StyleStatsModel } from '../../core/debug/format'
-import { summarizeArtifact, type ArtifactSummary } from '../../core/debug/probe'
+import { summarizeArtifact, type ArtifactSummary } from '../../core/debug/eval'
 import { errorMessage } from '../../core/errors'
 import { selectPersonaUid } from '../../core/persona/select'
 import { pushToast } from '../../core/toast'

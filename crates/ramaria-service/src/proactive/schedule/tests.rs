@@ -1072,15 +1072,18 @@ async fn spawn_loop_stops_cleanly() {
     let (engine, _storage, dir) = ready_engine("proactive-spawn-stop", config).await;
 
     let shutdown = Arc::new(AtomicBool::new(false));
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let handle = spawn(
         Arc::new(engine),
         Arc::clone(&shutdown),
+        stop_rx,
         0,
         1,
         Arc::new(CountingPicker::empty()),
     );
     tokio::time::sleep(Duration::from_millis(300)).await;
     shutdown.store(true, Ordering::Release);
+    let _ = stop_tx.send(true);
     tokio::time::timeout(Duration::from_secs(5), handle)
         .await
         .expect("调度任务应随停止位退出")

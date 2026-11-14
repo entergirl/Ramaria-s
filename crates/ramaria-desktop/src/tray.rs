@@ -185,9 +185,9 @@ fn handle_menu_event<R: Runtime>(app_handle: &AppHandle<R>, menu_id: &str) {
         }
         MENU_ID_QUIT => {
             tracing::info!("用户从托盘菜单选择退出");
-            // 确保主窗口可见（某些平台退出前需要先显示窗口才能正确清理）
+            // 先隐窗再退出：关停等待在主线程进行，窗口不应停留在屏幕上
             if let Some(window) = app_handle.get_webview_window("main") {
-                let _ = window.show();
+                let _ = window.hide();
             }
             app_handle.exit(0);
         }
@@ -334,7 +334,7 @@ fn intercept_close_event<R: Runtime>(app_handle: &AppHandle<R>) {
 /// 说明:
 /// - 前端弹窗后，根据用户选择调用此函数
 /// - "minimize" 将窗口隐藏到托盘
-/// - "exit" 确保窗口可见后退出整个应用（对齐托盘菜单退出行为）
+/// - "exit" 直接退出整个应用（窗口由退出路径统一隐藏，对齐托盘菜单退出行为）
 pub fn handle_close_action<R: Runtime>(app_handle: &AppHandle<R>, action: &str) {
     match action {
         "minimize" => {
@@ -347,9 +347,9 @@ pub fn handle_close_action<R: Runtime>(app_handle: &AppHandle<R>, action: &str) 
         }
         "exit" => {
             tracing::info!("用户选择退出 Ramaria");
-            // 确保主窗口可见（某些平台退出前需要先显示窗口才能正确清理）
+            // 先隐窗再退出：关停等待在主线程进行，窗口不应停留在屏幕上
             if let Some(window) = app_handle.get_webview_window("main") {
-                let _ = window.show();
+                let _ = window.hide();
             }
             app_handle.exit(0);
         }

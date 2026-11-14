@@ -3,14 +3,17 @@
 //! 设计特点:
 //! - 与传输无关的生命周期容器：活跃指针、手动关闭、空闲检测、L2/L3 调度、主动对话调度与关停统一装配
 //! - 宿主差异全部由 [`LifecycleOptions`] 表达（长驻宿主 / 仅空闲检查 / 单次执行），后台循环按选项拉起
-//! - 停止语义：共享原子停止位传入各循环，关停等待在途轮次收敛（超时只记日志，不阻塞退出）
+//! - 停止语义：原子停止位供轮次内判定，`watch` 通道供等待中的循环立即唤醒；
+//!   关停等待在途轮次收敛（超时只记日志，不阻塞退出）
 //! - 降级纪律：LLM 不可用 / 单条数据失败均不阻塞级联与关停，仅记日志后继续
 //! - 并发约定：指针与缓存由 `Mutex` 持有，锁内只做读写与克隆，不跨 `.await` 持锁
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use tokio::sync::watch;
 
 use ramaria_core::error::RamariaResult;
 use ramaria_core::lock::lock_recover;
@@ -43,6 +46,12 @@ const STARTUP_L1_RETRY_DELAY_SECONDS: u64 = 30;
 /// 关停等待后台循环收敛的上限（秒）：超过后放弃等待（进程即将退出，不强杀任务）。
 const SHUTDOWN_WAIT_TIMEOUT_SECONDS: u64 = 15;
 
+/// 限时关停时封存（含 L1 生成）可占用的上限（秒）：超时后登记 L1 补扫并继续退出。
+const SHUTDOWN_SEAL_TIMEOUT_SECONDS: u64 = 3;
+
+/// 限时关停时单个后台循环的等待上限（毫秒）：循环收到唤醒后立即退出，长等待只用于兜底。
+const SHUTDOWN_LOOP_WAIT_MILLIS: u64 = 500;
+
 // =========================================================
 // 生命周期容器
 // =========================================================
@@ -67,6 +76,8 @@ pub struct Lifecycle {
     session_last_active: Mutex<HashMap<Uuid, i64>>,
     /// 停止位（后台循环共享）。
     shutdown_flag: Arc<AtomicBool>,
+    /// 停止广播（后台循环在等待中订阅；与停止位同批置位）。
+    shutdown_tx: watch::Sender<bool>,
     /// 空闲阈值（分钟，热更新；空闲检查每轮读取最新值）。
     idle_minutes: Arc<AtomicU32>,
     /// 空闲检查循环句柄（None = 未拉起，或关停时已取走等待）。
@@ -87,12 +98,14 @@ impl Lifecycle {
     /// 返回:
     /// - 生命周期容器句柄；宿主退出时调用 [`Lifecycle::shutdown`] 优雅关停。
     pub fn start(engine: Arc<Engine>, options: LifecycleOptions) -> Arc<Self> {
+        let (shutdown_tx, _) = watch::channel(false);
         let lifecycle = Arc::new(Self {
             idle_minutes: Arc::new(AtomicU32::new(engine.config().session.l1_idle_minutes)),
             engine: Arc::clone(&engine),
             active_session_id: Mutex::new(None),
             session_last_active: Mutex::new(HashMap::new()),
             shutdown_flag: Arc::new(AtomicBool::new(false)),
+            shutdown_tx,
             idle_handle: Mutex::new(None),
             l2_l3_handle: Mutex::new(None),
             proactive_handle: Mutex::new(None),
@@ -118,6 +131,7 @@ impl Lifecycle {
             let handle = l2_l3::spawn_scheduler(
                 Arc::clone(&engine),
                 Arc::clone(&lifecycle.shutdown_flag),
+                lifecycle.shutdown_watch(),
                 first_delay_seconds,
                 interval_seconds,
             );
@@ -137,6 +151,7 @@ impl Lifecycle {
             let handle = crate::proactive::spawn(
                 Arc::clone(&engine),
                 Arc::clone(&lifecycle.shutdown_flag),
+                lifecycle.shutdown_watch(),
                 first_delay_seconds,
                 interval_seconds,
                 picker,
@@ -178,6 +193,11 @@ impl Lifecycle {
     /// 停止位（后台循环与宿主共享）。
     pub fn shutdown_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.shutdown_flag)
+    }
+
+    /// 停止广播订阅（后台循环在等待中据此立即唤醒）。
+    pub(crate) fn shutdown_watch(&self) -> watch::Receiver<bool> {
+        self.shutdown_tx.subscribe()
     }
 
     /// 当前空闲阈值（分钟）。
@@ -392,79 +412,25 @@ impl Lifecycle {
     /// 优雅关停：置停止位 → 关闭活跃会话（落库）→ 等待在途轮次结束。
     ///
     /// 顺序:
-    /// 1. 置 `shutdown_flag`（后台循环在下一轮感知后退出）；
+    /// 1. 置停止位并广播（等待中的后台循环立即唤醒退出）；
     /// 2. 关闭活跃会话（失败只记 error，不向上抛——退出流程不因单点失败中断）；
     /// 3. 取走三个循环句柄，各自按 15 秒上限等待（超时只 warn，不强杀任务）。
     ///
     /// 说明:
     /// - 可重复调用（第二次为空操作）；
-    /// - 不等待启动期 L1 补扫任务（该任务自行感知停止位退出）。
+    /// - 不等待启动期 L1 补扫任务（该任务自行感知停止位退出）；
+    /// - 需要总时长可控时用 [`Self::shutdown_with_timeout`]。
     pub async fn shutdown(&self) {
-        info!("会话生命周期关停开始");
-        self.shutdown_flag.store(true, Ordering::Release);
-
-        match self.close_active_session().await {
-            Ok(Some(outcome)) => info!(
-                sealed = outcome.sealed,
-                l1_count = outcome.l1_count,
-                "shutdown: 活跃会话已关闭"
-            ),
-            Ok(None) => debug!("shutdown: 无活跃会话（或已由其他路径完成）"),
-            Err(e) => error!(error = %e, "shutdown: 关闭活跃会话失败（继续退出）"),
-        }
-
-        let idle_handle = {
-            let mut guard = lock_recover(&self.idle_handle, "lifecycle.idle_handle");
-            guard.take()
-        };
-        if let Some(handle) = idle_handle {
-            let timeout = Duration::from_secs(SHUTDOWN_WAIT_TIMEOUT_SECONDS);
-            match tokio::time::timeout(timeout, handle).await {
-                Ok(Ok(())) => debug!("空闲检查循环已退出"),
-                Ok(Err(e)) => warn!(error = %e, "空闲检查循环异常结束"),
-                Err(_) => warn!(
-                    timeout_seconds = SHUTDOWN_WAIT_TIMEOUT_SECONDS,
-                    "空闲检查循环未在超时内退出（可能正在封存），放弃等待"
-                ),
-            }
-        }
-
-        let l2_l3_handle = {
-            let mut guard = lock_recover(&self.l2_l3_handle, "lifecycle.l2_l3_handle");
-            guard.take()
-        };
-        if let Some(handle) = l2_l3_handle {
-            let timeout = Duration::from_secs(SHUTDOWN_WAIT_TIMEOUT_SECONDS);
-            match tokio::time::timeout(timeout, handle).await {
-                Ok(Ok(())) => debug!("L2/L3 定时检查循环已退出"),
-                Ok(Err(e)) => warn!(error = %e, "L2/L3 定时检查循环异常结束"),
-                Err(_) => warn!(
-                    timeout_seconds = SHUTDOWN_WAIT_TIMEOUT_SECONDS,
-                    "L2/L3 定时检查循环未在超时内退出，放弃等待"
-                ),
-            }
-        }
-
-        let proactive_handle = {
-            let mut guard = lock_recover(&self.proactive_handle, "lifecycle.proactive_handle");
-            guard.take()
-        };
-        if let Some(handle) = proactive_handle {
-            let timeout = Duration::from_secs(SHUTDOWN_WAIT_TIMEOUT_SECONDS);
-            match tokio::time::timeout(timeout, handle).await {
-                Ok(Ok(())) => debug!("主动对话调度循环已退出"),
-                Ok(Err(e)) => warn!(error = %e, "主动对话调度循环异常结束"),
-                Err(_) => warn!(
-                    timeout_seconds = SHUTDOWN_WAIT_TIMEOUT_SECONDS,
-                    "主动对话调度循环未在超时内退出，放弃等待"
-                ),
-            }
-        }
-
-        info!("会话生命周期关停完成");
+        let _ = self.run_shutdown(None).await;
     }
 
-    /// 限时优雅关停：在总时限内等待 [`shutdown`](Self::shutdown) 收敛。
+    /// 限时优雅关停：封存与循环等待共享 `total` 时限，超时只记 warn。
+    ///
+    /// 预算:
+    /// - 封存最多 `SHUTDOWN_SEAL_TIMEOUT_SECONDS` 秒：超时时会话若已关闭，摘要按
+    ///   "已关闭但无 L1"登记补扫（下次启动或空闲轮次消费），不丢记忆；
+    /// - 每个后台循环最多 `SHUTDOWN_LOOP_WAIT_MILLIS` 毫秒：收到广播后通常立即退出，
+    ///   该上限只兜住正在封存的轮次。
     ///
     /// 参数:
     /// - `total`: 从调用开始计算的总等待上限。
@@ -473,17 +439,123 @@ impl Lifecycle {
     /// - 无返回值；正常收敛与超时都不向上抛错。
     ///
     /// 说明:
-    /// - 正常收敛时与 [`Self::shutdown`] 等价；超时只记 warn，不上抛、不 panic；
-    /// - 与 `shutdown` 一样可重复调用；
-    /// - 超时后放弃等待在途封存（进程即将退出），本次调用不保证会话已落库。
+    /// - 可重复调用；
+    /// - 超时后放弃等待在途工作（进程即将退出），本次调用不保证会话已落库。
     pub async fn shutdown_with_timeout(&self, total: Duration) {
-        match tokio::time::timeout(total, self.shutdown()).await {
-            Ok(()) => {}
-            Err(_) => warn!(
+        let deadline = Instant::now() + total;
+        if !self.run_shutdown(Some(deadline)).await {
+            warn!(
                 timeout_millis = total.as_millis(),
                 "生命周期关停未在时限内完成，放弃等待"
-            ),
+            );
         }
+    }
+
+    /// 关停主体：`deadline` 为空表示不设总时限（封存不限时、循环各自等待 15 秒）。
+    ///
+    /// 返回:
+    /// - `true`: 封存与全部循环等待均在时限内收敛；
+    /// - `false`: 有环节被放弃等待（调用方按需记录总时限告警）。
+    async fn run_shutdown(&self, deadline: Option<Instant>) -> bool {
+        info!("会话生命周期关停开始");
+        self.shutdown_flag.store(true, Ordering::Release);
+        self.shutdown_tx.send_replace(true);
+
+        let mut converged = true;
+
+        // ---- 关闭活跃会话（落库）----
+        match deadline.map(|d| {
+            d.saturating_duration_since(Instant::now())
+                .min(Duration::from_secs(SHUTDOWN_SEAL_TIMEOUT_SECONDS))
+        }) {
+            None => match self.close_active_session().await {
+                Ok(Some(outcome)) => info!(
+                    sealed = outcome.sealed,
+                    l1_count = outcome.l1_count,
+                    "shutdown: 活跃会话已关闭"
+                ),
+                Ok(None) => debug!("shutdown: 无活跃会话（或已由其他路径完成）"),
+                Err(e) => error!(error = %e, "shutdown: 关闭活跃会话失败（继续退出）"),
+            },
+            Some(budget) if budget.is_zero() => {
+                warn!("shutdown: 总时限已耗尽，跳过活跃会话封存");
+                converged = false;
+            }
+            Some(budget) => {
+                match tokio::time::timeout(budget, self.close_active_session()).await {
+                    Ok(Ok(Some(outcome))) => info!(
+                        sealed = outcome.sealed,
+                        l1_count = outcome.l1_count,
+                        "shutdown: 活跃会话已关闭"
+                    ),
+                    Ok(Ok(None)) => debug!("shutdown: 无活跃会话（或已由其他路径完成）"),
+                    Ok(Err(e)) => error!(error = %e, "shutdown: 关闭活跃会话失败（继续退出）"),
+                    Err(_) => {
+                        warn!(
+                            timeout_millis = budget.as_millis(),
+                            "shutdown: 封存未在时限内完成，登记 L1 补扫后继续退出"
+                        );
+                        // 会话可能已被封存第 1 步关闭但摘要缺失；补扫按"已有 L1 则跳过"幂等消费。
+                        if let Some(session_id) = self.active_session_id() {
+                            crate::seal::register_retry_if_closed(&self.engine, session_id).await;
+                        }
+                        converged = false;
+                    }
+                }
+            }
+        }
+
+        // ---- 等待三个后台循环退出（共享截止时间；无时限时各自 15 秒）----
+        let handles = [
+            (
+                "空闲检查循环",
+                lock_recover(&self.idle_handle, "lifecycle.idle_handle").take(),
+            ),
+            (
+                "L2/L3 定时检查循环",
+                lock_recover(&self.l2_l3_handle, "lifecycle.l2_l3_handle").take(),
+            ),
+            (
+                "主动对话调度循环",
+                lock_recover(&self.proactive_handle, "lifecycle.proactive_handle").take(),
+            ),
+        ];
+        for (label, handle) in handles {
+            let Some(handle) = handle else {
+                continue;
+            };
+            let cap = match deadline {
+                Some(_) => Duration::from_millis(SHUTDOWN_LOOP_WAIT_MILLIS),
+                None => Duration::from_secs(SHUTDOWN_WAIT_TIMEOUT_SECONDS),
+            };
+            let budget = match deadline {
+                Some(d) => {
+                    let remaining = d.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        warn!(loop_name = label, "shutdown: 总时限已耗尽，放弃等待该循环");
+                        converged = false;
+                        continue;
+                    }
+                    remaining.min(cap)
+                }
+                None => cap,
+            };
+            match tokio::time::timeout(budget, handle).await {
+                Ok(Ok(())) => debug!(loop_name = label, "后台循环已退出"),
+                Ok(Err(e)) => warn!(loop_name = label, error = %e, "后台循环异常结束"),
+                Err(_) => {
+                    warn!(
+                        loop_name = label,
+                        timeout_millis = budget.as_millis(),
+                        "后台循环未在时限内退出，放弃等待"
+                    );
+                    converged = false;
+                }
+            }
+        }
+
+        info!("会话生命周期关停完成");
+        converged
     }
 }
 

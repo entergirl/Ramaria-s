@@ -16,8 +16,8 @@ use ramaria_service::Engine;
 
 use crate::cli::{
     BackendModeArg, BlocksCmd, ChannelCmd, Cli, Commands, ConfigCmd, CorpusCmd, EvalArgs, EvalCmd,
-    FactCmd, ImportCmd, IndexCmd, KeywordAliasCmd, KeywordCmd, PersonaCmd, ProbeArgs, RuleCmd,
-    SessionCmd, StickerCmd, StyleCmd,
+    FactCmd, ImportCmd, IndexCmd, KeywordAliasCmd, KeywordCmd, PersonaCmd, RuleCmd, SessionCmd,
+    StickerCmd, StyleCmd,
 };
 
 /// 评测参数 → 评测层命令（纯映射，不触碰引擎与文件系统）。
@@ -495,77 +495,6 @@ pub(crate) async fn dispatch(engine: &Arc<Engine>, cli: Cli) -> anyhow::Result<(
                 json: cli.json,
             };
             commands::status::run(engine, args).await?;
-        }
-        Commands::Probe(sub) => {
-            let cmd = match sub {
-                ProbeArgs::Build {
-                    persona,
-                    questions_per_dim,
-                    seed,
-                    source,
-                    output,
-                    ablation,
-                } => commands::probe::ProbeCmd::Build {
-                    persona,
-                    questions_per_dim,
-                    seed,
-                    source,
-                    output,
-                    ablation,
-                    json: cli.json,
-                },
-                ProbeArgs::Run {
-                    dataset,
-                    variants,
-                    limit,
-                    no_rebuild_utt,
-                    repeat,
-                    output,
-                } => commands::probe::ProbeCmd::Run {
-                    dataset,
-                    variants,
-                    limit,
-                    // clap 的 --no-rebuild-utt（默认 false）；内部 rebuild_utt=true 表示重建
-                    rebuild_utt: !no_rebuild_utt,
-                    repeat: (repeat > 1).then_some(repeat),
-                    output,
-                    json: cli.json,
-                },
-                ProbeArgs::Evaluate {
-                    results,
-                    dataset,
-                    variants,
-                    output,
-                    no_tone_judge,
-                } => commands::probe::ProbeCmd::Evaluate {
-                    results,
-                    dataset,
-                    variants,
-                    output,
-                    no_tone_judge,
-                    json: cli.json,
-                },
-                ProbeArgs::Baseline { window_hours } => commands::probe::ProbeCmd::Baseline {
-                    window_hours,
-                    json: cli.json,
-                },
-                ProbeArgs::Report {
-                    results,
-                    evaluation,
-                    calibration,
-                    output,
-                    ablation,
-                } => commands::probe::ProbeCmd::Report {
-                    results,
-                    evaluation,
-                    calibration,
-                    output,
-                    ablation,
-                    json: cli.json,
-                },
-            };
-            // 探针命令经服务层引擎执行（部分算法原语由探针模块直接调用）
-            commands::probe::run(engine, cmd, cli.yes).await?;
         }
         // eval 在引擎初始化前分流（见 main：评测不建用户库与配置）；此处仅保证穷尽
         Commands::Eval(_) => {

@@ -551,6 +551,38 @@ async fn shutdown_with_timeout_returns_on_expiry() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 关停唤醒：空闲间隔 60 秒时，停止广播应叫醒等待中的循环，不等下一次 tick。
+#[tokio::test]
+async fn shutdown_wakes_idle_loop_before_next_tick() {
+    let (engine, _storage, dir) = engine_with_db("life-shutdown-wake").await;
+    let engine = Arc::new(engine);
+    let lifecycle = engine.start_lifecycle(LifecycleOptions {
+        idle: true,
+        l2_l3: false,
+        proactive: false,
+        startup_l1_retry: false,
+        idle_interval_seconds: Some(60),
+        l2_l3_interval_seconds: None,
+        l2_l3_first_delay_seconds: None,
+        proactive_interval_seconds: None,
+        proactive_first_delay_seconds: None,
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let started = Instant::now();
+    lifecycle
+        .shutdown_with_timeout(Duration::from_secs(5))
+        .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "关停应唤醒等待中的循环，实际耗时 {:?}",
+        started.elapsed()
+    );
+    assert!(!lifecycle.idle_loop_running(), "关停后空闲循环不应再运行");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 封存结果对照：手动关闭（Lifecycle）与引擎封存（Engine::seal）产出等价摘要。
 #[tokio::test]
 async fn lifecycle_close_matches_engine_seal() {
@@ -617,6 +649,109 @@ async fn lifecycle_close_matches_engine_seal() {
     assert_eq!(value_a["summary"], value_b["summary"]);
     assert_eq!(value_a["keywords"], value_b["keywords"]);
     assert_eq!(value_a["persona_uid"], value_b["persona_uid"]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 封存超时：会话已关闭时登记 L1 补扫，关停按总时限返回。
+#[tokio::test]
+async fn shutdown_seal_timeout_registers_l1_retry() {
+    /// 慢 LLM：`chat` 先等待指定时长，用于制造封存超时。
+    struct SlowLlm {
+        inner: MockLlm,
+        delay: Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl ramaria_core::traits::LlmProvider for SlowLlm {
+        async fn chat(
+            &self,
+            request: &ramaria_core::traits::ChatRequest,
+        ) -> ramaria_core::error::RamariaResult<String> {
+            tokio::time::sleep(self.delay).await;
+            self.inner.chat(request).await
+        }
+
+        async fn chat_stream(
+            &self,
+            request: &ramaria_core::traits::ChatRequest,
+        ) -> ramaria_core::error::RamariaResult<
+            std::pin::Pin<
+                Box<
+                    dyn futures::Stream<
+                            Item = ramaria_core::error::RamariaResult<
+                                ramaria_core::traits::StreamDelta,
+                            >,
+                        > + Send,
+                >,
+            >,
+        > {
+            self.inner.chat_stream(request).await
+        }
+
+        fn capability(&self) -> &ramaria_core::types::ModelCapability {
+            self.inner.capability()
+        }
+
+        fn config(&self) -> &ramaria_core::types::BackendConfig {
+            self.inner.config()
+        }
+
+        async fn validate(&self) -> ramaria_core::error::RamariaResult<()> {
+            self.inner.validate().await
+        }
+
+        fn name(&self) -> &'static str {
+            self.inner.name()
+        }
+    }
+
+    let (engine, storage, dir) = crate::test_support::engine_with_shared_provider(
+        "life-shutdown-seal-timeout",
+        Arc::new(SlowLlm {
+            inner: MockLlm::with_reply(L1_JSON_REPLY),
+            delay: Duration::from_secs(30),
+        }),
+        RamariaConfig::default(),
+    )
+    .await;
+    seed_persona(&storage, "char-0001").await;
+    let session = seed_session_with_messages(&storage, "char-0001", 4, now_ms()).await;
+    let engine = Arc::new(engine);
+    let lifecycle = engine.start_lifecycle(LifecycleOptions::none());
+    lifecycle.set_active_session_id(Some(session));
+
+    let started = Instant::now();
+    lifecycle
+        .shutdown_with_timeout(Duration::from_millis(300))
+        .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "封存超时应按总时限返回，实际耗时 {:?}",
+        started.elapsed()
+    );
+
+    let row = storage
+        .get_session(session)
+        .await
+        .expect("查询会话应成功")
+        .expect("会话应存在");
+    assert!(row.ended_at.is_some(), "封存第 1 步应已关闭会话");
+    let pending = storage.list_pending_jobs().await.expect("查询任务应成功");
+    assert!(
+        pending
+            .iter()
+            .any(|(_, job_type, _)| job_type == "l1_summary_retry"),
+        "封存超时应登记 L1 补扫任务"
+    );
+    assert!(
+        storage
+            .list_memory_l1(session)
+            .await
+            .expect("读取 L1 应成功")
+            .is_empty(),
+        "超时后本次不应产出 L1"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

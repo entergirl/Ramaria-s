@@ -206,16 +206,7 @@ function makeRuntime(overrides: Partial<DebugFixture> = {}) {
             return { dir: String(args.dir), total: fixture.files.length, files: fixture.files }
           }
           case 'read_eval_result':
-            return (
-              fixture.evalArtifact ?? {
-                persona_uid: 'rama-0001',
-                judge_used: true,
-                embedding_used: false,
-                generated_at: '2026-09-01T00:00:00Z',
-                variants: [{ variant_id: 'B1', fact_score: 0.8, params: { ablation: 'B1' } }],
-                auxiliary: { evidence_traceability_rate: 0.9 },
-              }
-            )
+            return fixture.evalArtifact ?? sampleEvalReport()
           default:
             throw new Error(`未预期的命令: ${command}`)
         }
@@ -416,9 +407,9 @@ describe('调试视图', () => {
     await flushPromises()
 
     expect(wrapper.find('.artifact-title').text()).toBe('report-B1.json')
-    expect(wrapper.text()).toContain('消融报告')
-    expect(wrapper.text()).toContain('已使用')
-    expect(wrapper.find('.score').text()).toContain('事实')
+    expect(wrapper.text()).toContain('评测报告')
+    expect(wrapper.text()).toContain('已配置')
+    expect(wrapper.find('.score').text()).toContain('得分率')
   })
 
   it('打开评测报告时先渲染结论行', async () => {

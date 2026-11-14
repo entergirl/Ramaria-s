@@ -127,7 +127,6 @@ fn help_groups() -> Vec<(&'static str, &'static str)> {
         ("diagnostics", "管理"),
         ("status", "高级"),
         ("eval", "高级"),
-        ("probe", "高级"),
         ("mcp", "高级"),
     ]
 }

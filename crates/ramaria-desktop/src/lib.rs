@@ -6,7 +6,7 @@
 //! - 通过 Tauri managed state (`DesktopState`) 注入引擎 / 生命周期到所有 Command
 //! - 全部业务命令经服务层用例执行；桌面只保留事件桥、托盘与通知等宿主能力
 //! - 系统托盘在 Tauri setup 钩子中初始化
-//! - 退出路径限时停止通道并封存活跃会话，超时只记 warn，不阻塞进程退出
+//! - 退出路径先隐窗，再限时停止通道并封存活跃会话；超时只记 warn，不阻塞进程退出
 //!
 //! 日志与隐私:
 //! - 默认只开 `info` 级：桌面 crate 的 debug 日志含运行细节，而日志文件会随
@@ -299,25 +299,34 @@ pub fn run() {
     let app = builder
         .build(tauri::generate_context!())
         .expect("构建 Tauri 应用失败");
-    app.run(move |_app_handle, event| {
-        // 退出前先停通道、再封存活跃会话；外层总时限兜住两项，超时只记 warn（进程即将退出）
+    app.run(move |app_handle, event| {
+        // 退出前先隐窗、再停通道、最后封存活跃会话：
+        // - 隐窗放在最前：窗口与退出等待解耦，用户不再看到无响应窗口；
+        // - 通道停止与生命周期各有预算，外层总时限再兜一层，超时只记 warn（进程即将退出）。
         if let tauri::RunEvent::Exit = event {
+            if let Some(window) = app_handle.get_webview_window("main") {
+                let _ = window.hide();
+            }
             tauri::async_runtime::block_on(async {
                 let shutdown = async {
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
+                    if tokio::time::timeout(
+                        std::time::Duration::from_millis(1500),
                         channel_manager.stop(),
                     )
-                    .await;
+                    .await
+                    .is_err()
+                    {
+                        tracing::warn!(timeout_millis = 1500, "通道停止未在时限内完成，放弃等待");
+                    }
                     lifecycle
-                        .shutdown_with_timeout(std::time::Duration::from_secs(15))
+                        .shutdown_with_timeout(std::time::Duration::from_secs(5))
                         .await;
                 };
-                if tokio::time::timeout(std::time::Duration::from_secs(20), shutdown)
+                if tokio::time::timeout(std::time::Duration::from_secs(7), shutdown)
                     .await
                     .is_err()
                 {
-                    tracing::warn!(timeout_seconds = 20, "退出关停未在总时限内完成，放弃等待");
+                    tracing::warn!(timeout_seconds = 7, "退出关停未在总时限内完成，放弃等待");
                 }
             });
         }

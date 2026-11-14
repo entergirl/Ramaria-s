@@ -327,9 +327,11 @@ async fn spawn_scheduler_stops_on_flag() {
     let (engine, _storage, dir) = engine_with_db("l2l3-spawn").await;
     let engine = Arc::new(engine);
     let shutdown = Arc::new(AtomicBool::new(false));
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
 
-    let handle = spawn_scheduler(Arc::clone(&engine), Arc::clone(&shutdown), 0, 1);
+    let handle = spawn_scheduler(Arc::clone(&engine), Arc::clone(&shutdown), stop_rx, 0, 1);
     shutdown.store(true, Ordering::Release);
+    let _ = stop_tx.send(true);
 
     // 轮询等待退出（最多 6 秒）：不依赖固定 sleep，避免慢机偶发失败
     let deadline = Instant::now() + Duration::from_secs(6);

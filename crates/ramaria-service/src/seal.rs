@@ -273,6 +273,42 @@ async fn register_l1_retry(
     }
 }
 
+/// 会话已关闭但缺少 L1 时登记补扫任务（关停封存超时的补偿）。
+///
+/// 语义:
+/// - 会话不存在 / 仍活跃 / 已有 L1 → 不登记；
+/// - 只登记任务，不在此处调用 LLM；补扫消费时若已有 L1 会幂等跳过。
+pub(crate) async fn register_retry_if_closed(engine: &Engine, session_id: Uuid) {
+    let storage = engine.storage_ref().as_ref();
+    let session = match storage.get_session(session_id).await {
+        Ok(Some(session)) => session,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(%session_id, error = %error, "关停补偿：查询会话失败，跳过 L1 补扫登记");
+            return;
+        }
+    };
+    if session.ended_at.is_none() {
+        return;
+    }
+    match storage.list_memory_l1(session_id).await {
+        Ok(list) if !list.is_empty() => return,
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%session_id, error = %error, "关停补偿：查询已有 L1 失败，跳过补扫登记");
+            return;
+        }
+    }
+    let target_projection = session.channel == CHANNEL_QQ || session.channel == CHANNEL_TELEGRAM;
+    register_l1_retry(
+        engine,
+        session_id,
+        session.persona_uid.as_deref(),
+        target_projection,
+    )
+    .await;
+}
+
 // =========================================================
 // utt / examples
 // =========================================================

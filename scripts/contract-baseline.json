@@ -109,7 +109,6 @@
     "Diagnostics",
     "Status",
     "Eval",
-    "Probe",
     "Mcp"
   ],
   "mcp_tools": [

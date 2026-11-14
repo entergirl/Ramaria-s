@@ -5,7 +5,7 @@
  * - 关键词三态分组（空组保留、未知状态归入待确认）
  * - 说话风格统计解析为五维分组、每千字频率与状态色调
  * - 统计参数损坏时的非解析标记
- * - probe 产物摘要：类型识别、档位得分、逐轮聚合与辅助指标
+ * - 评测报告摘要：类型识别、条件得分、结论与辅助指标
  * - 产物文件的大小与修改时间文案
  */
 
@@ -21,7 +21,7 @@ import {
   ratioLabel,
   scoreLabel,
 } from '../src/core/debug/format'
-import { detectKind, gateDescription, summarizeArtifact } from '../src/core/debug/probe'
+import { detectKind, summarizeArtifact } from '../src/core/debug/eval'
 
 function entry(keyword: string, status: string, useCount = 1): KeywordEntry {
   return {
@@ -180,70 +180,6 @@ describe('调试纯函数', () => {
     expect(model.sampleCount).toBe(312)
   })
 
-  it('产物摘要识别类型、档位得分与辅助指标', () => {
-    const artifact = summarizeArtifact({
-      persona_uid: 'rama-0001',
-      judge_used: true,
-      embedding_used: false,
-      generated_at: '2026-09-01T00:00:00Z',
-      variants: [
-        { variant_id: 'B1', fact_score: 0.8, tone_score: 3.2, params: { ablation: 'B1' } },
-        { variant_id: 'F0', fact_score_norm: 0.52, params: { ablation: 'F0' } },
-      ],
-      auxiliary: {
-        evidence_traceability_rate: 0.9,
-        profile_regression_output_stability: 0.2,
-        annotation: '不进指标',
-      },
-    })
-
-    expect(artifact.kind).toBe('report')
-    expect(artifact.meta.personaUid).toBe('rama-0001')
-    expect(artifact.meta.judgeUsed).toBe(true)
-    expect(artifact.variants).toHaveLength(2)
-    expect(artifact.variants[0]?.gateText).toBe('完整基线（RAG + 四层）')
-    expect(artifact.variants[0]?.scores).toEqual([
-      { label: '事实', value: 0.8 },
-      { label: '语气', value: 3.2 },
-    ])
-    expect(artifact.variants[1]?.scores).toEqual([{ label: '事实(归一)', value: 0.52 }])
-    expect(artifact.auxiliary?.map((metric) => metric.label)).toEqual([
-      '证据链可追溯率',
-      '画像回归稳定性',
-    ])
-    expect(artifact.hasContent).toBe(true)
-  })
-
-  it('产物逐轮维度聚合兼容数组与对象两种形态', () => {
-    const arrayForm = summarizeArtifact({
-      judge_used: false,
-      variants: [
-        {
-          variant_id: 'I_behavior',
-          dimension_scores: [
-            { dimension: 'fact', mean: 0.61, n: 3, ci95_low: 0.5, ci95_high: 0.72 },
-          ],
-        },
-      ],
-    })
-    const score = arrayForm.variants[0]?.scores[0]
-    expect(score?.label).toBe('事实（逐轮）')
-    expect(score?.value).toBe(0.61)
-    expect(score?.detail).toBe('n=3 CI[0.5, 0.72]')
-
-    const objectForm = summarizeArtifact({
-      judge_used: false,
-      variants: {
-        S_behavior: { tone_mean: 3.5, dimension_scores: { tone: { mean: 3.4, n: 2 } } },
-      },
-    })
-    expect(objectForm.variants[0]?.name).toBe('S_behavior')
-    expect(objectForm.variants[0]?.scores.map((item) => item.label)).toEqual([
-      '语气均值',
-      '语气（逐轮）',
-    ])
-  })
-
   it('评测报告按条件行展开并带结论', () => {
     const report = evalReportFixture()
 
@@ -254,11 +190,8 @@ describe('调试纯函数', () => {
     const summary = summarizeArtifact(report)
     expect(summary.kind).toBe('eval_report')
     expect(summary.meta.judgeUsed).toBe(true)
-    expect(summary.meta.personaUid).toBeNull()
-    expect(summary.meta.generatedAt).toBeNull()
     expect(summary.variants).toHaveLength(2)
     expect(summary.variants[0]?.name).toBe('u1-y1/flat-rag/800/0')
-    expect(summary.variants[0]?.ablation).toBeNull()
     expect(summary.variants[0]?.gateText).toBe('flat-rag / 800 字符')
     expect(summary.variants[0]?.scores.map((item) => item.label)).toEqual([
       '得分率',
@@ -302,17 +235,23 @@ describe('调试纯函数', () => {
     // 条件为空但有结论，仍算有内容
     expect(skipped.hasContent).toBe(true)
   })
-  it('畸形产物与未知档位安全降级', () => {
+  it('无法识别的产物安全降级', () => {
     const empty = summarizeArtifact(null)
     expect(empty.kind).toBe('unknown')
     expect(empty.variants).toEqual([])
     expect(empty.auxiliary).toBeNull()
+    expect(empty.hypotheses).toBeNull()
     expect(empty.hasContent).toBe(false)
 
-    const run = summarizeArtifact({ dataset_seed: 42, generated_at: 't', variants: [] })
-    expect(run.kind).toBe('run')
-    expect(gateDescription('unknown')).toBeNull()
-    expect(gateDescription('I_behavior')).toBe('净增量：B1 基座 + behavior 专属层')
+    // 旧版探针产物不再识别：有结构化字段也给空摘要
+    const legacy = summarizeArtifact({
+      dataset_seed: 42,
+      generated_at: 't',
+      variants: [{ variant_id: 'B1', fact_score: 0.8 }],
+    })
+    expect(legacy.kind).toBe('unknown')
+    expect(legacy.variants).toEqual([])
+    expect(legacy.hasContent).toBe(false)
   })
 
   it('文件大小与修改时间按档位展示', () => {

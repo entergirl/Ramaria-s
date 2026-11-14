@@ -173,7 +173,16 @@ async fn loop_triggers_generate_and_deliver() {
     }));
 
     let shutdown = Arc::new(AtomicBool::new(false));
-    let handle = spawn(Arc::new(engine), Arc::clone(&shutdown), 1, 1, picker);
+    // 保持发送端存活：循环只在收到广播后退出，用例结束由运行时回收
+    let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let handle = spawn(
+        Arc::new(engine),
+        Arc::clone(&shutdown),
+        stop_rx,
+        1,
+        1,
+        picker,
+    );
 
     // 轮询等待接收端收到 1 条（上限 5 秒）
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -251,7 +260,16 @@ async fn loop_with_real_picker_delivers_event_topic() {
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let picker: Arc<dyn TopicPicker> = Arc::new(PickerTopicProvider);
-    let handle = spawn(Arc::new(engine), Arc::clone(&shutdown), 1, 1, picker);
+    // 保持发送端存活：循环只在收到广播后退出，用例结束由运行时回收
+    let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let handle = spawn(
+        Arc::new(engine),
+        Arc::clone(&shutdown),
+        stop_rx,
+        1,
+        1,
+        picker,
+    );
 
     // 轮询等待接收端收到 1 条（上限 5 秒）
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -345,7 +363,16 @@ async fn loop_with_judge_uses_scripted_llm() {
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let picker: Arc<dyn TopicPicker> = Arc::new(PickerTopicProvider);
-    let handle = spawn(Arc::new(engine), Arc::clone(&shutdown), 1, 1, picker);
+    // 保持发送端存活：循环只在收到广播后退出，用例结束由运行时回收
+    let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let handle = spawn(
+        Arc::new(engine),
+        Arc::clone(&shutdown),
+        stop_rx,
+        1,
+        1,
+        picker,
+    );
 
     // 轮询等待接收端收到 1 条（上限 5 秒）
     let deadline = Instant::now() + Duration::from_secs(5);

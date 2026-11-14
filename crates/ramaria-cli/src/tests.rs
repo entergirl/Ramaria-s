@@ -1,7 +1,7 @@
 //! crates/ramaria-cli/src/tests.rs - CLI 参数解析与入口装配单元测试
 //!
 //! 设计特点:
-//! - 覆盖 clap 参数解析（--db 优先级 / eval 与 probe 子命令 / rule clusters / 帮助分组）
+//! - 覆盖 clap 参数解析（--db 优先级 / eval 子命令 / rule clusters / 帮助分组）
 //! - 覆盖 `init_app` 装配路径（临时 SQLite 库，config.toml 读取与后端对齐）
 //! - 覆盖退出码契约与入口统一错误文案的映射
 //! - 经 `use super::*` 复用入口模块的私有项与装配函数
@@ -11,8 +11,8 @@ use clap::Parser;
 use ramaria_core::traits::StoreInfrastructure;
 
 use crate::cli::{
-    BackendModeArg, Cli, Commands, CorpusCmd, EvalArgs, EvalCmd, ImportCmd, McpCmd, ProbeArgs,
-    RuleCmd, StyleCmd,
+    BackendModeArg, Cli, Commands, CorpusCmd, EvalArgs, EvalCmd, ImportCmd, McpCmd, RuleCmd,
+    StyleCmd,
 };
 
 /// 串行化 env 变量测试（多个 #[test] 并行时会互相干扰环境变量）。
@@ -52,114 +52,6 @@ fn db_path_defaults_when_nothing_set() {
     unsafe { std::env::remove_var("RAMARIA_DB_PATH") };
     let db = parse_db(&["ramaria", "status"]);
     assert_eq!(db, PathBuf::from("data/ramaria.db"));
-}
-
-/// `probe run --no-rebuild-utt` 可解析，且映射到内部 rebuild_utt=false。
-#[test]
-fn probe_run_no_rebuild_utt_flag_parses() {
-    let cli = Cli::try_parse_from([
-        "ramaria",
-        "probe",
-        "run",
-        "--dataset",
-        "d.json",
-        "--no-rebuild-utt",
-    ])
-    .expect("--no-rebuild-utt 应可解析");
-    match cli.command {
-        Commands::Probe(ProbeArgs::Run {
-            dataset,
-            no_rebuild_utt,
-            repeat,
-            ..
-        }) => {
-            assert_eq!(dataset, PathBuf::from("d.json"));
-            assert!(no_rebuild_utt, "--no-rebuild-utt 应置位");
-            assert_eq!(repeat, 1, "默认 repeat=1（不聚合）");
-        }
-        _ => panic!("应解析为 Probe::Run，实际解析为其他命令"),
-    }
-}
-
-/// `probe report --ablation` 可解析（消融对比报告模式）。
-#[test]
-fn probe_report_ablation_flag_parses() {
-    let cli = Cli::try_parse_from([
-        "ramaria",
-        "probe",
-        "report",
-        "--results",
-        "r.json",
-        "--evaluation",
-        "e.json",
-        "--ablation",
-    ])
-    .expect("--ablation 应可解析");
-    match cli.command {
-        Commands::Probe(ProbeArgs::Report { ablation, .. }) => {
-            assert!(ablation, "--ablation 应置位");
-        }
-        _ => panic!("应解析为 Probe::Report"),
-    }
-    // 不带 --ablation → 默认 false（普通报告行为不变）
-    let cli2 = Cli::try_parse_from(["ramaria", "probe", "report", "--results", "r.json"])
-        .expect("普通 report 应可解析");
-    match cli2.command {
-        Commands::Probe(ProbeArgs::Report { ablation, .. }) => {
-            assert!(!ablation, "默认 ablation=false");
-        }
-        _ => panic!("应解析为 Probe::Report"),
-    }
-}
-
-/// `probe run --repeat N` 可解析，且默认不置 `--no-rebuild-utt`。
-#[test]
-fn probe_run_repeat_flag_parses() {
-    let cli = Cli::try_parse_from([
-        "ramaria",
-        "probe",
-        "run",
-        "--dataset",
-        "d.json",
-        "--repeat",
-        "5",
-    ])
-    .expect("--repeat 应可解析");
-    match cli.command {
-        Commands::Probe(ProbeArgs::Run {
-            repeat,
-            no_rebuild_utt,
-            ..
-        }) => {
-            assert_eq!(repeat, 5);
-            assert!(
-                !no_rebuild_utt,
-                "不带 --no-rebuild-utt 时默认应重建（rebuild_utt=true）"
-            );
-        }
-        _ => panic!("应解析为 Probe::Run，实际解析为其他命令"),
-    }
-}
-
-/// `probe baseline --window-hours` 可解析，缺省为 24。
-#[test]
-fn probe_baseline_window_hours_parses() {
-    let cli = Cli::try_parse_from(["ramaria", "probe", "baseline", "--window-hours", "6"])
-        .expect("--window-hours 应可解析");
-    match cli.command {
-        Commands::Probe(ProbeArgs::Baseline { window_hours }) => {
-            assert_eq!(window_hours, 6);
-        }
-        _ => panic!("应解析为 Probe::Baseline，实际解析为其他命令"),
-    }
-
-    let cli2 = Cli::try_parse_from(["ramaria", "probe", "baseline"]).expect("缺省参数应可解析");
-    match cli2.command {
-        Commands::Probe(ProbeArgs::Baseline { window_hours }) => {
-            assert_eq!(window_hours, 24, "回应窗口缺省 24 小时");
-        }
-        _ => panic!("应解析为 Probe::Baseline"),
-    }
 }
 
 /// `ramaria eval` 无参进入沙盒分支，各子命令可解析并映射到对应变体。

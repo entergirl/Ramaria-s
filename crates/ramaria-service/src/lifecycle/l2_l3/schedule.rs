@@ -5,6 +5,7 @@
 //! - 时间线阈值来自配置（`> 0` 才启用）：L1 超龄触发 L2，事件超龄触发 L3
 //! - 每轮先消费封存失败遗留的 L1 补扫任务；无主 L1 按时间阈值归属并触发提取
 //! - 停止位按 60 秒分片感知，任一片收到停止信号即退出
+//! - 首轮延迟与轮次等待均可被停止广播立即打断
 //! - 日志只记 persona 与计数，不记原文
 
 use std::sync::Arc;
@@ -12,9 +13,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ramaria_core::types::now_ms;
+use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
 use crate::engine::Engine;
+use crate::lifecycle::wait_shutdown;
 
 use super::l2::{run_l2_extraction, shutdown_requested};
 use super::l3::run_l3_inference;
@@ -37,11 +40,13 @@ use super::unbound::process_unbound_l1_for_l2;
 /// 参数:
 /// - `engine`: 服务层引擎（`Arc` 共享）。
 /// - `shutdown`: 宿主停止位（true = 循环应在下一轮退出）。
+/// - `wake`: 停止广播订阅（等待中的循环据此立即退出）。
 /// - `first_delay_seconds`: 首轮检查前的延迟秒数。
 /// - `interval_seconds`: 两轮检查之间的间隔秒数。
 pub(crate) fn spawn_scheduler(
     engine: Arc<Engine>,
     shutdown: Arc<AtomicBool>,
+    mut wake: watch::Receiver<bool>,
     first_delay_seconds: u64,
     interval_seconds: u64,
 ) -> tokio::task::JoinHandle<()> {
@@ -51,8 +56,15 @@ pub(crate) fn spawn_scheduler(
     );
 
     tokio::spawn(async move {
-        // 首次延迟：避免在宿主启动阶段执行检查
-        tokio::time::sleep(Duration::from_secs(first_delay_seconds)).await;
+        // 首次延迟：避免在宿主启动阶段执行检查；等待期间收到停止信号立即退出
+        let stopped = tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(first_delay_seconds)) => false,
+            stop = wait_shutdown(&mut wake) => stop,
+        };
+        if stopped {
+            info!("L2/L3 定时检查任务在首轮延迟期间收到停止信号，退出");
+            return;
+        }
 
         loop {
             if shutdown.load(Ordering::Relaxed) {
@@ -63,12 +75,14 @@ pub(crate) fn spawn_scheduler(
             // 执行定时检查
             run_scheduled_check(&engine, Some(&shutdown)).await;
 
-            // 等待下一次检查（可中断，每 60s 检查一次停止信号）
-            let mut sleep_secs = interval_seconds;
-            while sleep_secs > 0 && !shutdown.load(Ordering::Relaxed) {
-                let chunk = sleep_secs.min(60);
-                tokio::time::sleep(Duration::from_secs(chunk)).await;
-                sleep_secs = sleep_secs.saturating_sub(chunk);
+            // 等待下一次检查；停止广播立即打断
+            let stopped = tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(interval_seconds)) => false,
+                stop = wait_shutdown(&mut wake) => stop,
+            };
+            if stopped {
+                info!("L2/L3 定时检查任务收到停止信号，退出");
+                return;
             }
         }
     })

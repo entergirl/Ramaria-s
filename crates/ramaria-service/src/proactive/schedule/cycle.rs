@@ -2,19 +2,20 @@
 //!
 //! 设计特点:
 //! - 首轮延迟后按间隔循环，单轮失败只记错误不终止
-//! - 首轮延迟与轮次等待按分片感知停止位，停止后立即退出
+//! - 首轮延迟与轮次等待收到停止广播立即退出
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use tokio::sync::watch;
 use tracing::{debug, error, info};
 
 use ramaria_core::types::now_ms;
 
 use crate::engine::Engine;
+use crate::lifecycle::wait_shutdown;
 
-use super::SHUTDOWN_POLL_CHUNK_SECONDS;
 use super::round::run_tick;
 use super::types::TopicPicker;
 
@@ -33,12 +34,14 @@ use super::types::TopicPicker;
 /// 参数:
 /// - `engine`: 服务层引擎（`Arc` 共享）。
 /// - `shutdown`: 宿主停止位（true = 循环应在下一轮退出）。
+/// - `wake`: 停止广播订阅（等待中的循环据此立即退出）。
 /// - `first_delay_seconds`: 首轮检查前的延迟秒数。
 /// - `interval_seconds`: 两轮检查之间的间隔秒数。
 /// - `picker`: 选题提供者（宿主装配）。
 pub(crate) fn spawn(
     engine: Arc<Engine>,
     shutdown: Arc<AtomicBool>,
+    mut wake: watch::Receiver<bool>,
     first_delay_seconds: u64,
     interval_seconds: u64,
     picker: Arc<dyn TopicPicker>,
@@ -50,7 +53,11 @@ pub(crate) fn spawn(
 
     tokio::spawn(async move {
         // 首次延迟：避免在宿主启动阶段触发；等待期间收到停止信号直接退出
-        if !interruptible_sleep(first_delay_seconds, &shutdown).await {
+        let stopped = tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(first_delay_seconds)) => false,
+            stop = wait_shutdown(&mut wake) => stop,
+        };
+        if stopped {
             info!("主动对话调度任务在首轮延迟期间收到停止信号，退出");
             return;
         }
@@ -80,25 +87,15 @@ pub(crate) fn spawn(
                 }
             }
 
-            // 等待下一轮；0 间隔热转由装配层夹取兜底
-            interruptible_sleep(interval_seconds, &shutdown).await;
+            // 等待下一轮；停止广播立即打断
+            let stopped = tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(interval_seconds)) => false,
+                stop = wait_shutdown(&mut wake) => stop,
+            };
+            if stopped {
+                info!("主动对话调度任务收到停止信号，退出");
+                return;
+            }
         }
     })
-}
-
-/// 可中断等待：按 60 秒分片睡眠，每片感知停止位。
-///
-/// 返回:
-/// - `true`: 睡满指定秒数；`false`: 等待期间收到停止信号（调用方应立即退出）。
-async fn interruptible_sleep(seconds: u64, shutdown: &AtomicBool) -> bool {
-    let mut remaining = seconds;
-    while remaining > 0 {
-        if shutdown.load(Ordering::Relaxed) {
-            return false;
-        }
-        let chunk = remaining.min(SHUTDOWN_POLL_CHUNK_SECONDS);
-        tokio::time::sleep(Duration::from_secs(chunk)).await;
-        remaining = remaining.saturating_sub(chunk);
-    }
-    !shutdown.load(Ordering::Relaxed)
 }

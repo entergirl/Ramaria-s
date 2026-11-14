@@ -5,7 +5,7 @@
 //! - 与宿主的活跃指针一致性 / 状态刷新均在 [`Lifecycle::tick_idle`] 内完成，本模块只做循环编排
 //! - 首次检查延后一个间隔（给宿主启动留缓冲）；封存耗时超过间隔时按延迟补跑而非连续追赶
 //! - 单轮失败（库 / LLM 不可用）只记日志，下一轮继续重试，不终止循环
-//! - 停止由 [`Lifecycle`] 的共享停止位收敛；日志只记计数与 ID，不记原文
+//! - 停止由 [`Lifecycle`] 的共享停止位与广播收敛：等待中的循环立即唤醒退出；日志只记计数与 ID，不记原文
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -26,6 +26,7 @@ pub(crate) fn spawn(
     interval_seconds: u64,
 ) -> tokio::task::JoinHandle<()> {
     let shutdown = lifecycle.shutdown_flag();
+    let mut wake = lifecycle.shutdown_watch();
     tokio::spawn(async move {
         // tokio 定时器要求非零周期：即使调用方传入 0 也退化为 1 秒
         let interval_seconds = interval_seconds.max(1);
@@ -42,7 +43,14 @@ pub(crate) fn spawn(
         );
 
         loop {
-            ticker.tick().await;
+            let stopped = tokio::select! {
+                _ = ticker.tick() => false,
+                stop = super::wait_shutdown(&mut wake) => stop,
+            };
+            if stopped {
+                info!("空闲检查线程收到停止信号，退出");
+                return;
+            }
             if shutdown.load(Ordering::Acquire) {
                 info!("空闲检查线程收到停止信号，退出");
                 return;

@@ -4,7 +4,7 @@
 //! - clap derive 定义顶层 `Cli` 与全部子命令结构，全局选项对所有命令可用
 //! - `Cli` 字段以 `pub(crate)` 暴露给入口与分发模块读取
 //! - 子命令枚举按命令族聚合，词表（list/show/import/…）与帮助分组一一对应；
-//!   评测、探针与首次配置命令族的参数单独成文件（`cli/eval.rs` / `cli/probe.rs` / `cli/setup.rs`），经本模块转出
+//!   评测与首次配置命令族的参数单独成文件（`cli/eval.rs` / `cli/setup.rs`），经本模块转出
 //! - 参数值解析器（`parse_limit` / `parse_import_side`）与所校验字段就地定义
 //! - 顶层命令的新增须同步登记到 `main.rs` 的帮助分组表
 
@@ -12,13 +12,11 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-// 评测、探针与首次配置命令族参数单独成文件；经本模块转出保持 `crate::cli::*` 调用路径
+// 评测与首次配置命令族参数单独成文件；经本模块转出保持 `crate::cli::*` 调用路径
 mod eval;
-mod probe;
 mod setup;
 
 pub(crate) use eval::{BackendModeArg, CorpusCmd, EvalArgs, EvalCmd};
-pub(crate) use probe::ProbeArgs;
 pub(crate) use setup::SetupArgs;
 
 // =========================================================
@@ -198,10 +196,6 @@ pub(crate) enum Commands {
     /// 评测（无参进入评测台，默认沙盒；run / corpus / baseline / score / report）[高级]
     #[command(display_order = 51)]
     Eval(EvalArgs),
-
-    /// 探针实验（build: 构建测试集 / run: 档位批量实验 / baseline: 数值基线统计）[高级]
-    #[command(display_order = 51, subcommand)]
-    Probe(ProbeArgs),
 
     /// MCP 服务端（serve: 以 stdio 提供记忆与人格工具）[高级]
     #[command(display_order = 52, subcommand)]

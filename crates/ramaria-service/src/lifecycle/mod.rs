@@ -7,7 +7,7 @@
 //! - `l2_l3`：L2 事件提取触发（含无主 L1 归属）与 L3 性格推断级联
 //! - `idle`：空闲检查线程（阈值热更新、全库扫描、活跃指针一致性、状态刷新）
 //! - 主动对话调度：`proactive::spawn` 经 container 装配（仅桌面宿主启用）
-//! - 停止语义：共享原子停止位传入各循环，关停等待在途轮次收敛（超时只记日志，不阻塞退出）
+//! - 停止语义：原子停止位供轮次内判定，`watch` 广播把等待中的循环立即叫醒；关停等待收敛（超时只记日志）
 //!
 //! 模块划分:
 //! - `options`：装配选项（宿主差异全部由 [`LifecycleOptions`] 表达）；
@@ -23,6 +23,22 @@ mod options;
 
 pub use container::Lifecycle;
 pub use options::LifecycleOptions;
+
+/// 等待停止广播；返回 `true` 表示循环应立即退出。
+///
+/// 说明:
+/// - 已置位时立即返回 `true`；
+/// - 发送端被丢弃（宿主提前释放容器）同样返回 `true`，避免循环在已失效的广播上空转；
+/// - 停止位仍由原子标志承担轮次内判定，本函数只负责把等待中的任务叫醒。
+pub(crate) async fn wait_shutdown(rx: &mut tokio::sync::watch::Receiver<bool>) -> bool {
+    if *rx.borrow() {
+        return true;
+    }
+    match rx.changed().await {
+        Ok(()) => *rx.borrow(),
+        Err(_) => true,
+    }
+}
 
 #[cfg(test)]
 mod tests;

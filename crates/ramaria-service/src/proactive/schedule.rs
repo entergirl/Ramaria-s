@@ -39,8 +39,6 @@ pub(crate) use types::{DeliveryOutcome, TopicPicker};
 const RECENT_TOPICS_CAP: usize = 64;
 /// 效价符号判定阈值：`|valence|` 低于该值视为中性（不参与"不连选"符号判定）。
 const VALENCE_SIGN_EPSILON: f64 = 0.1;
-/// 可中断等待的分片长度（秒）。
-const SHUTDOWN_POLL_CHUNK_SECONDS: u64 = 60;
 
 // =========================================================
 // 单元测试

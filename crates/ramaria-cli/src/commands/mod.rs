@@ -2,7 +2,7 @@
 //!
 //! 设计特点:
 //! - 每个命令一个子模块，职责单一
-//! - 业务命令接收 `Arc<ramaria_service::Engine>` 作为统一依赖；探针命令经应用层装配
+//! - 业务命令接收 `Arc<ramaria_service::Engine>` 作为统一依赖；评测命令经应用层装配
 //! - 命令函数返回 `anyhow::Result<>`，错误由 main.rs 统一处理
 
 pub mod ask;
@@ -18,7 +18,6 @@ pub mod keyword_cmd;
 pub mod mcp;
 pub mod memory;
 pub mod persona;
-pub mod probe;
 pub mod rule;
 pub mod session;
 pub mod setup;
