@@ -25,6 +25,7 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+ramaria-testkit = { path = "../ramaria-testkit" }
 sqlx.workspace = true
 
 [target.'cfg(windows)'.dependencies]

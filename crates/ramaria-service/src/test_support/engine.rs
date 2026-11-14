@@ -104,6 +104,15 @@ pub(crate) async fn engine_with_shared_llm(
     assemble_engine(tag, provider, embedding, config).await
 }
 
+/// 以共享 provider 装配引擎（需要 testkit 之外的用量口径时使用）。
+pub(crate) async fn engine_with_shared_provider(
+    tag: &str,
+    llm: Arc<dyn LlmProvider>,
+    config: RamariaConfig,
+) -> (Engine, Arc<SqliteStorage>, PathBuf) {
+    assemble_engine(tag, llm, None, config).await
+}
+
 /// 以共享句柄注入脚本化 LLM（多步 LLM 链路的调用序列断言用），并可指定嵌入 provider。
 pub(crate) async fn engine_with_shared_scripted_llm(
     tag: &str,

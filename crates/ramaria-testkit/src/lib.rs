@@ -14,4 +14,7 @@ pub mod mock;
 pub use db::{TempDb, db, memory_db};
 pub use mock::embedding::{CountingEmbedding, DeterministicEmbedding};
 pub use mock::storage::MockStorage;
-pub use mock::{MockEmbedding, MockFailingLlm, MockLlm, MockLlmProvider, ScriptedLlm};
+pub use mock::{
+    MockEmbedding, MockFailingLlm, MockLlm, MockLlmProvider, MockRoutedLlm, MockUsageLlm,
+    ScriptedLlm,
+};

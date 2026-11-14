@@ -55,6 +55,35 @@ fn stream_delta_construction() {
     assert_eq!(delta.content, "今天");
 }
 
+/// 用量累加逐字段相加，命中率按输入占比换算；无输入时为 None。
+#[test]
+fn llm_usage_adds_and_rates() {
+    let mut total = LlmUsage::default();
+    assert!(total.is_empty(), "新建用量应为空");
+    assert_eq!(total.cache_hit_rate(), None, "无输入时命中率无定义");
+
+    total.add(LlmUsage {
+        prompt_tokens: 1000,
+        completion_tokens: 100,
+        cache_hit_tokens: 768,
+        cache_miss_tokens: 232,
+    });
+    total.add(LlmUsage {
+        prompt_tokens: 1000,
+        completion_tokens: 50,
+        cache_hit_tokens: 256,
+        cache_miss_tokens: 744,
+    });
+
+    assert_eq!(total.prompt_tokens, 2000);
+    assert_eq!(total.completion_tokens, 150);
+    assert_eq!(total.cache_hit_tokens, 1024);
+    assert_eq!(total.cache_miss_tokens, 976);
+    assert!(!total.is_empty());
+    let rate = total.cache_hit_rate().expect("有输入应给出命中率");
+    assert!((rate - 1024.0 / 2000.0).abs() < 1e-9, "命中率={rate}");
+}
+
 #[test]
 fn embedding_model_info() {
     let info = EmbeddingModelInfo {

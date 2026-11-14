@@ -24,6 +24,7 @@ use crate::baseline::manifest::{self, BaselineManifest, Counts};
 use crate::baseline::qrels::{self, QrelsRow};
 use crate::baseline::tier::{Checkpoint, TierSpec};
 use crate::baseline::{BaselineArtifact, EVAL_PIPELINE_VERSION};
+use crate::baseline::{artifacts as tier_artifacts, artifacts::CorpusFacts};
 
 use super::{PERSONA_DIR, PersonaRecord, SampleStats, StepContext};
 
@@ -143,6 +144,10 @@ pub(super) async fn write_artifact(
         rows.extend(sample_rows.rows);
     }
     qrels::write(&tier_dir, &rows)?;
+    // 映射一律从库里重新采集：续跑时前缀样本没有内存统计，拼装会缺段。
+    let corpus_facts = CorpusFacts::from_spec(input.context.corpus, input.context.file);
+    let map = tier_artifacts::collect(engine, used, tier, tier.id, corpus_facts).await?;
+    tier_artifacts::write(&tier_dir, &map)?;
     assembly::write_config_snapshot(&tier_dir)?;
     copy_personas(&tier_dir, active_personas)?;
 

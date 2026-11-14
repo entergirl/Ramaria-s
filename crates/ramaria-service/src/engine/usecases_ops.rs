@@ -15,6 +15,7 @@ use std::sync::Arc;
 use ramaria_core::config::RamariaConfig;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::lock::write_recover;
+use ramaria_core::traits::LlmProvider;
 use ramaria_core::types::{AppState, BackendConfig};
 
 use crate::config::{ConfigWriter, SyncOutcome, SyncWriteResult};
@@ -439,6 +440,22 @@ impl Engine {
         api_key: Option<&str>,
     ) -> RamariaResult<()> {
         crate::model::update_backend_config(self, config, api_key).await
+    }
+
+    /// 按给定后端配置构造一个评测专用 LLM provider（无副作用出口）。
+    ///
+    /// 参数:
+    /// - `config`: 本次判分要使用的后端配置（provider / base_url / model）。
+    ///
+    /// 返回:
+    /// - 成功时返回独立构造的 provider；配置非法或密钥缺失返回对应错误。
+    ///
+    /// 说明:
+    /// - 无副作用：不落库、不热替换引擎快照、不写 config.toml，provider 与引擎互不影响；
+    /// - 不注入响应缓存：判分需要对同一提示词独立多次采样，命中缓存会抹平投票差异；
+    /// - 仅供评测判分使用，产品用例一律走引擎快照里的 provider。
+    pub fn eval_llm(&self, config: &BackendConfig) -> RamariaResult<Arc<dyn LlmProvider>> {
+        crate::model::eval_llm(config)
     }
 
     /// 校验指定目录能否作为嵌入模型使用（无副作用探测）。

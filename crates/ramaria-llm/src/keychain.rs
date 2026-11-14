@@ -11,6 +11,7 @@
 //! - API key 不进入日志（仅在 debug 级别记录 target_name 的成功/失败状态）
 //! - 不缓存密钥内容，每次调用 `get_api_key` 都从 keychain 实时读取
 //! - 写入操作完全覆盖（overwrite），不保留旧值
+//! - 内存覆盖只服务进程内临时注入（评测专用密钥），不落库、不写配置文件
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 
@@ -27,8 +28,35 @@ use ramaria_core::error::{RamariaError, RamariaResult};
 /// 平台支持:
 /// - Windows: Credential Manager (CredReadW / CredWriteW / CredDeleteW)
 /// - macOS/Linux: 待后续实现（当前返回 `Unsupported` 错误）
-#[derive(Debug, Clone)]
-pub struct Keychain;
+///
+/// 字段约定:
+/// - `override_key`: 进程内覆盖条目；命中时优先返回覆盖值，不再读系统凭据。
+#[derive(Clone)]
+pub struct Keychain {
+    override_key: Option<OverrideKey>,
+}
+
+/// 单条内存覆盖（服务名 + 密钥明文，仅存在于进程内存）。
+#[derive(Clone)]
+struct OverrideKey {
+    service: String,
+    key: String,
+}
+
+// 手动实现 Debug：只暴露覆盖是否命中及服务名，绝不输出密钥内容
+impl std::fmt::Debug for Keychain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Keychain")
+            .field(
+                "override_service",
+                &self
+                    .override_key
+                    .as_ref()
+                    .map(|entry| entry.service.as_str()),
+            )
+            .finish()
+    }
+}
 
 impl Keychain {
     /// 创建新的 Keychain 实例。
@@ -36,7 +64,29 @@ impl Keychain {
     /// 返回:
     /// - 无状态的 Keychain 实例，所有方法实时调用系统 API。
     pub fn new() -> Self {
-        Self
+        Self { override_key: None }
+    }
+
+    /// 创建带单条内存覆盖的实例。
+    ///
+    /// 参数:
+    /// - `service`: 覆盖命中的服务标识（与 `get_api_key` 入参同一口径，如 `"deepseek"`）；
+    /// - `key`: 密钥明文，只留在本实例内存中。
+    ///
+    /// 返回:
+    /// - 只含该条覆盖的实例：读同名服务返回 `key`，其他服务照常走系统 keychain。
+    ///
+    /// 说明:
+    /// - 写入 / 删除接口不受覆盖影响，仍作用于系统凭据；
+    /// - Debug 输出不含密钥内容；
+    /// - 用于进程内临时注入（如评测专用密钥），不落库、不写配置文件。
+    pub fn with_override(service: &str, key: &str) -> Self {
+        Self {
+            override_key: Some(OverrideKey {
+                service: service.to_string(),
+                key: key.to_string(),
+            }),
+        }
     }
 
     /// 从 keychain 读取 API key。
@@ -46,10 +96,17 @@ impl Keychain {
     ///   内部会转换为 `ramaria/{service}` 格式作为 Credential Manager target_name。
     ///
     /// 返回:
-    /// - `Ok(Some(key))`: key 存在且读取成功。
+    /// - `Ok(Some(key))`: 命中内存覆盖，或系统 keychain 中存在该凭据。
     /// - `Ok(None)`: key 不存在（CredReadW 返回 ERROR_NOT_FOUND）。
     /// - `Err(RamariaError::Privacy)`: keychain 读取失败。
+    ///
+    /// 说明: 命中内存覆盖时不访问系统凭据（服务名一致即返回覆盖值）。
     pub fn get_api_key(&self, service: &str) -> RamariaResult<Option<String>> {
+        if let Some(entry) = &self.override_key
+            && entry.service == service
+        {
+            return Ok(Some(entry.key.clone()));
+        }
         read_credential(service)
     }
 
@@ -287,5 +344,32 @@ mod tests {
             !matches!(&result, Ok(Some(_))),
             "读取确定不存在的 service 不应返回 Ok(Some)，实际: {result:?}"
         );
+    }
+
+    /// 内存覆盖优先于系统凭据：同名服务直接返回覆盖值，其他服务不受影响。
+    #[test]
+    fn with_override_reads_override_before_system() {
+        let secret = "sk-eval-override-secret";
+        let keychain = Keychain::with_override("deepseek", secret);
+
+        let read = keychain.get_api_key("deepseek").expect("覆盖读取应成功");
+        assert_eq!(read.as_deref(), Some(secret), "应返回覆盖值");
+
+        let other = keychain.get_api_key("openai");
+        assert!(
+            !matches!(&other, Ok(Some(value)) if value == secret),
+            "其他服务不得返回覆盖值，实际: {other:?}"
+        );
+    }
+
+    /// Debug 输出不含密钥内容（只暴露是否覆盖与服务名）。
+    #[test]
+    fn debug_hides_override_key() {
+        let secret = "sk-eval-override-secret";
+        let keychain = Keychain::with_override("deepseek", secret);
+
+        let text = format!("{keychain:?}");
+        assert!(!text.contains(secret), "Debug 不得包含密钥内容: {text}");
+        assert!(text.contains("deepseek"), "Debug 应标出覆盖服务名: {text}");
     }
 }

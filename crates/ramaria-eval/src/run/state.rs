@@ -24,7 +24,15 @@ mod tests;
 pub const RUN_ARTIFACT_KIND: &str = "ramaria_eval_run";
 
 /// 状态文件自身的 schema 版本。
-pub const RUN_SCHEMA_VERSION: u32 = 1;
+///
+/// 版本差异:
+/// - 2: 逐题产物带判分原料（`evidence` / `question_type` / `score_points`）；
+/// - 1: 逐题产物只有题目与召回，判分原料需回读基线。
+///
+/// 说明:
+/// - 版本只描述本进程写出的产物形态，不参与读取校验：旧目录照常续跑，
+///   已存在 `run.json` 里的版本值不会被改写。
+pub const RUN_SCHEMA_VERSION: u32 = 2;
 
 // =========================================================
 // 状态结构
@@ -136,6 +144,19 @@ struct AttemptRow {
 // =========================================================
 
 impl RunState {
+    /// 定位条件计数条目。
+    ///
+    /// 参数:
+    /// - `condition_id`: 条件标识。
+    ///
+    /// 返回:
+    /// - 命中返回该条件的可变计数条目；未登记的条件返回 `None`。
+    pub(super) fn condition_mut(&mut self, condition_id: &str) -> Option<&mut ConditionState> {
+        self.conditions
+            .iter_mut()
+            .find(|entry| entry.id == condition_id)
+    }
+
     /// 读取已有状态，或在空目录新建。
     ///
     /// 参数:
@@ -146,7 +167,7 @@ impl RunState {
     ///
     /// 返回:
     /// - 新建：状态为运行中、计数清零，并立即落盘；
-    /// - 已有：保留计数供续跑，状态回到运行中；
+    /// - 已有：保留计数供续跑，状态回到运行中；旧产物版本号原样保留，不按版本拒绝；
     /// - 已有状态的矩阵与入参不一致返回 `Validation`（提示换 `--output` 或删旧目录）。
     pub fn load_or_init(
         root: &Path,

@@ -4563,6 +4563,7 @@ dependencies = [
  "futures",
  "ramaria-core",
  "ramaria-service",
+ "ramaria-testkit",
  "ratatui",
  "serde",
  "serde_json",

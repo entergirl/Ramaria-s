@@ -99,20 +99,46 @@ pub(crate) enum EvalCmd {
         /// 产物输出路径
         #[arg(long)]
         output: Option<PathBuf>,
+
+        /// 只回填 artifact 映射（需同时给 --tier）
+        #[arg(long)]
+        artifacts: bool,
     },
 
     /// 对已有运行结果判分
     Score {
-        /// 运行 id
+        /// 运行 id（也可以是运行根目录路径）
         run_id: String,
+
+        /// 跳过 judge 判分，只产出确定性指标
+        #[arg(long)]
+        no_judge: bool,
     },
 
     /// 生成运行报告
     Report {
-        /// 运行 id
+        /// 运行 id（也可以是运行根目录路径）
         run_id: String,
 
-        /// 报告输出路径
+        /// 压缩层 oracle 的运行 id（缺省尝试运行根下的 oracle）
+        #[arg(long)]
+        oracle: Option<String>,
+
+        /// 额外对照运行（可重复），用于预算轴或其它对照
+        #[arg(long = "compare")]
+        compare: Vec<String>,
+
+        /// 报告输出目录（缺省为运行根下 report）
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    /// 以预置上下文跑压缩层 oracle
+    Oracle {
+        /// 被引用的运行 id（也可以是运行根目录路径）
+        run_id: String,
+
+        /// 产物输出路径（缺省为被引用运行根下的 oracle）
         #[arg(long)]
         output: Option<PathBuf>,
     },

@@ -6,16 +6,18 @@
 //! - 成功与失败共用同一结构：失败行 `reply` / `recall` 为 `null`，`error` 带原因
 //! - 追加写：只 `append` 不重写，中断后同一键多行以最后一行为准
 //! - 设备字段取编译期常量与运行时核数，不探测硬件型号
+//! - 用量只落 token 数值（含缓存命中），旧产物缺该键按"无用量"处理
 
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::Path;
 
 use ramaria_core::error::{RamariaError, RamariaResult};
+use ramaria_core::traits::LlmUsage;
 use ramaria_service::{EvalChatOutcome, EvalRecallObservation};
 use serde::{Deserialize, Serialize};
 
-use crate::baseline::BaselineManifest;
+use crate::baseline::{BaselineManifest, QrelsScorePoint};
 
 use super::matrix::Condition;
 use super::plan::RunItem;
@@ -33,7 +35,10 @@ mod tests;
 /// - `tier` / `pipeline` / `budget_chars` / `answer_model`: 条件轴；
 /// - `sample_key` / `persona_uid` / `ask_time` / `as_of_ms`: 题目与查询时钟；
 /// - `question` / `gold_answer` / `gold_message_ids` / `category`: 判分原料；
+/// - `evidence` / `question_type` / `score_points`: 判分原料（旧产物缺这三键时取空）；
 /// - `reply` / `reply_chars` / `recall`: 结果（失败行为 `None`）；
+/// - `preset_chars`: 预置上下文实际注入字数（检索管线、会话或上下文阶段失败、旧产物为 `None`）；
+/// - `usage`: 本题生成的 token 用量（provider 未上报、缓存命中或失败时为 `None`）；
 /// - `attempts`: 本题累计尝试次数（含首次）；
 /// - `conditions`: 语料 / 模型 / 设备 / 索引等条件行。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -53,10 +58,25 @@ pub struct RunItemRecord {
     pub question: String,
     pub gold_answer: String,
     pub gold_message_ids: Vec<String>,
+    /// 语料侧证据引用（chat 标识），供证据链核对；旧产物为空。
+    #[serde(default)]
+    pub evidence: Vec<String>,
+    /// 题目类型标签（单跳 / 多跳等），供分类统计；旧产物为空。
+    #[serde(default)]
+    pub question_type: Vec<String>,
+    /// 分项判分要点；旧产物为空，判分时按缺原料处理。
+    #[serde(default)]
+    pub score_points: Vec<QrelsScorePoint>,
     pub category: Vec<u8>,
     pub reply: Option<String>,
     pub reply_chars: usize,
     pub recall: Option<EvalRecallObservation>,
+    /// 预置上下文实际注入的字符数；检索管线与旧产物缺该键时为 `None`。
+    #[serde(default)]
+    pub preset_chars: Option<usize>,
+    /// 本题生成的 token 用量；旧产物缺该键时为 `None`
+    #[serde(default)]
+    pub usage: Option<LlmUsage>,
     pub elapsed_ms: u64,
     pub error: Option<String>,
     pub attempts: u32,
@@ -132,7 +152,9 @@ impl RunItemRecord {
     /// - `outcome`: 生成结果（回复 + 召回观测）；
     /// - `elapsed_ms`: 本题耗时（含重试）；
     /// - `attempts`: 累计尝试次数；
+    /// - `preset_chars`: 预置上下文实际注入字数（非预置管线为 `None`）；
     /// - `line`: 条件行。
+    #[allow(clippy::too_many_arguments)]
     pub fn success(
         item: &RunItem,
         condition: &Condition,
@@ -140,6 +162,7 @@ impl RunItemRecord {
         elapsed_ms: u64,
         attempts: u32,
         effective: &str,
+        preset_chars: Option<usize>,
         line: ConditionLine,
     ) -> Self {
         Self {
@@ -157,10 +180,15 @@ impl RunItemRecord {
             question: item.row.question.clone(),
             gold_answer: item.row.answer.clone(),
             gold_message_ids: item.row.gold_message_ids.clone(),
+            evidence: item.row.evidence.clone(),
+            question_type: item.row.question_type.clone(),
+            score_points: item.row.score_points.clone(),
             category: item.row.category.clone(),
             reply_chars: outcome.chars,
             reply: Some(outcome.reply),
             recall: Some(outcome.recall),
+            preset_chars,
+            usage: outcome.usage,
             elapsed_ms,
             error: None,
             attempts,
@@ -174,7 +202,9 @@ impl RunItemRecord {
     /// - `item` / `condition` / `line`: 同成功行；
     /// - `error`: 失败原因（面向判分与排查，不含回复正文）；
     /// - `elapsed_ms`: 本题耗时（含重试）；
-    /// - `attempts`: 累计尝试次数（条件级失败为 0）。
+    /// - `attempts`: 累计尝试次数（条件级失败为 0）；
+    /// - `preset_chars`: 预置上下文实际注入字数（未拼过预置上下文为 `None`）。
+    #[allow(clippy::too_many_arguments)]
     pub fn failure(
         item: &RunItem,
         condition: &Condition,
@@ -182,6 +212,7 @@ impl RunItemRecord {
         elapsed_ms: u64,
         attempts: u32,
         effective: &str,
+        preset_chars: Option<usize>,
         line: ConditionLine,
     ) -> Self {
         Self {
@@ -199,10 +230,15 @@ impl RunItemRecord {
             question: item.row.question.clone(),
             gold_answer: item.row.answer.clone(),
             gold_message_ids: item.row.gold_message_ids.clone(),
+            evidence: item.row.evidence.clone(),
+            question_type: item.row.question_type.clone(),
+            score_points: item.row.score_points.clone(),
             category: item.row.category.clone(),
             reply: None,
             reply_chars: 0,
             recall: None,
+            preset_chars,
+            usage: None,
             elapsed_ms,
             error: Some(error.to_string()),
             attempts,

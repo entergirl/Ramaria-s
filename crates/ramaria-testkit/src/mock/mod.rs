@@ -8,8 +8,10 @@
 
 pub mod embedding;
 pub mod llm;
+pub mod routed;
 pub mod storage;
 
 pub use embedding::{CountingEmbedding, DeterministicEmbedding, MockEmbedding};
-pub use llm::{MockFailingLlm, MockLlm, MockLlmProvider, ScriptedLlm};
+pub use llm::{MockFailingLlm, MockLlm, MockLlmProvider, MockUsageLlm, ScriptedLlm};
+pub use routed::MockRoutedLlm;
 pub use storage::MockStorage;

@@ -87,7 +87,9 @@ pub(crate) async fn run(engine: &Engine, req: ChatSendRequest) -> RamariaResult<
     );
 
     // ---- 非流式：LLM 生成（失败不落库，避免库内留下孤立用户消息） ----
-    let reply = step_call_llm(engine, &prepared.chat_request, prepared.session_id).await?;
+    // 交互路径不需要用量：文本由同一条调用返回，用量丢弃。
+    let (reply, _usage) =
+        step_call_llm(engine, &prepared.chat_request, prepared.session_id).await?;
 
     // ---- 落库（用户消息 + 助手回复；均带人格归属，供桌面按来源展示） ----
     let storage = engine.storage_ref().as_ref();
@@ -157,7 +159,8 @@ pub(crate) async fn answer_eval(
     );
 
     // ---- 非流式：LLM 生成（失败不落库，与产品入口同一纪律） ----
-    let reply = step_call_llm(engine, &prepared.chat_request, prepared.session_id).await?;
+    // 用量随本次调用返回：provider 未上报或缓存命中时为 None。
+    let (reply, usage) = step_call_llm(engine, &prepared.chat_request, prepared.session_id).await?;
 
     let storage = engine.storage_ref().as_ref();
     let chars = step_persist_reply(
@@ -181,6 +184,7 @@ pub(crate) async fn answer_eval(
         session_id: prepared.session_id,
         chars,
         recall: prepared.recall.unwrap_or_default(),
+        usage,
     })
 }
 

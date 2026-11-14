@@ -11,15 +11,17 @@
 
 use super::tests::REPLY;
 use crate::test_support::{
-    CountingEmbedding, MockLlm, engine_with_shared_llm, seed_l1, seed_persona,
+    CountingEmbedding, MockLlm, engine_with_shared_llm, engine_with_shared_provider, seed_l1,
+    seed_persona,
 };
 use crate::types::{
     CHANNEL_MCP, ChatSendRequest, DEFAULT_PERSONA_UID, EvalChatOptions, EvalInjectionMask,
 };
 use ramaria_core::config::RamariaConfig;
-use ramaria_core::traits::{EmbeddingProvider, StoreCrud};
+use ramaria_core::traits::{EmbeddingProvider, LlmProvider, LlmUsage, StoreCrud};
 use ramaria_core::types::{MemoryEvent, PersonalityTrait, TraitLayer, TraitSource, now_ms};
 use ramaria_storage::SqliteStorage;
+use ramaria_testkit::MockUsageLlm;
 use std::sync::Arc;
 
 /// 一天毫秒数（夹具时间刻度）。
@@ -106,6 +108,7 @@ async fn memory_only_mask_observes_memory_layers_only() {
         .expect("评测生成应成功");
 
     assert_eq!(outcome.reply, REPLY);
+    assert!(outcome.usage.is_none(), "mock 未上报用量时结果应为空用量");
     let layers: Vec<&str> = outcome
         .recall
         .items
@@ -383,6 +386,40 @@ async fn chat_send_matches_eval_with_all_layers() {
         eval_messages.len(),
         "落库消息数应一致"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// =========================================================
+// 生成用量
+// =========================================================
+
+/// 评测生成把本次调用的用量放进结果；用量随返回值流动，不读共享槽位。
+#[tokio::test]
+async fn eval_outcome_carries_per_call_usage() {
+    let usage = LlmUsage {
+        prompt_tokens: 500,
+        completion_tokens: 20,
+        cache_hit_tokens: 400,
+        cache_miss_tokens: 100,
+    };
+    let mock = Arc::new(MockUsageLlm::new(REPLY, usage));
+    let provider: Arc<dyn LlmProvider> = mock.clone();
+    let (engine, storage, dir) =
+        engine_with_shared_provider("eval-usage", provider, RamariaConfig::default()).await;
+    seed_persona(&storage, DEFAULT_PERSONA_UID).await;
+
+    let outcome = engine
+        .chat_answer_eval(
+            request("工作压力", "eval-usage"),
+            EvalChatOptions::default(),
+        )
+        .await
+        .expect("评测生成应成功");
+
+    assert_eq!(outcome.reply, REPLY);
+    assert_eq!(outcome.usage, Some(usage), "用量应随本次调用返回");
+    assert_eq!(mock.calls(), 1, "评测生成只调用一次模型");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

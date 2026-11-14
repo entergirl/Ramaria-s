@@ -6,12 +6,13 @@
 //! - 管理 reqwest HTTP 客户端（连接池、超时）
 //! - 手动 `Clone` / `Debug`：API key 遮蔽输出，仅显示是否存在
 //! - 请求体和响应体不自动记录（由上层决定是否记录 prompt）
+//! - 非流式响应顺带解析 token 用量（含缓存命中字段，缺字段按全 miss 记）
 
 use futures::Stream;
 use futures::channel::mpsc;
 use ramaria_core::error::{RamariaError, RamariaResult};
 use ramaria_core::lock::{read_recover, write_recover};
-use ramaria_core::traits::StreamDelta;
+use ramaria_core::traits::{LlmUsage, StreamDelta};
 use std::pin::Pin;
 
 use super::error::http_error;
@@ -146,7 +147,7 @@ impl OpenAiTransport {
     // 非流式请求
     // =========================================================
 
-    /// 发送非流式聊天请求，返回完整 assistant 回复文本。
+    /// 发送非流式聊天请求，返回完整 assistant 回复文本与本次 token 用量。
     ///
     /// 参数:
     /// - `messages`: OpenAI 格式消息数组（已包含 system/user/assistant 角色）。
@@ -156,7 +157,7 @@ impl OpenAiTransport {
     /// - `enable_thinking`: 思考模式开关（`Some(true)` 开启，其余关闭）。
     ///
     /// 返回:
-    /// - 成功时返回 assistant 完整文本。
+    /// - 成功时返回 assistant 完整文本与 `Option<LlmUsage>`（响应无 `usage` 段时为 `None`）。
     /// - HTTP 4xx → `RamariaError::Llm`（含 status 和响应体摘要）。
     /// - HTTP 5xx / 网络错误 → `RamariaError::Llm`（含 source）。
     pub async fn chat(
@@ -166,7 +167,7 @@ impl OpenAiTransport {
         temperature: f64,
         max_tokens: u32,
         enable_thinking: Option<bool>,
-    ) -> RamariaResult<String> {
+    ) -> RamariaResult<(String, Option<LlmUsage>)> {
         let url = format!("{}/chat/completions", self.base_url);
         // 思考模式按请求参数构造（thinking.type）：
         // - 默认（None / Some(false)）关闭：deepseek-v4-flash 默认开启思考
@@ -236,7 +237,7 @@ impl OpenAiTransport {
             )));
         }
 
-        Ok(content)
+        Ok((content, usage_of(&parsed)))
     }
 
     // =========================================================
@@ -331,11 +332,8 @@ impl OpenAiTransport {
         url: &str,
         body: &serde_json::Value,
     ) -> RamariaResult<reqwest::Response> {
-        let mut req = self
-            .http
-            .post(url)
-            .json(body)
-            .header("Content-Type", "application/json");
+        // `.json()` 已设置唯一的 Content-Type；再显式追加会形成重复头，服务端按缺头拒绝。
+        let mut req = self.http.post(url).json(body);
 
         let api_key = read_recover(&self.api_key, "llm_transport.api_key").clone();
         if let Some(key) = api_key.as_ref() {
@@ -355,4 +353,52 @@ impl OpenAiTransport {
             }
         })
     }
+}
+
+// =========================================================
+// 响应用量解析
+// =========================================================
+
+/// 从非流式响应 JSON 解析 token 用量。
+///
+/// 参数:
+/// - `parsed`: 完整响应体（OpenAI chat completion 结构）。
+///
+/// 返回:
+/// - `None`: 响应没有 `usage` 段（provider 未返回用量），调用方视为"无用量信息"；
+/// - `Some(usage)`: 四个计数取自 `usage` 段。
+///
+/// 缓存字段的缺失口径（避免把缺字段误读成高命中率）:
+/// - 两个缓存字段都缺 → `hit = 0`、`miss = prompt_tokens`（未知按全 miss）；
+/// - 只缺 `miss` → `miss = prompt_tokens - hit`；
+/// - 只缺 `hit` → `hit = 0`。
+///
+/// 说明: 只做数值搬运，不做单位换算；字段类型不符按缺失处理。
+pub(crate) fn usage_of(parsed: &serde_json::Value) -> Option<LlmUsage> {
+    let usage = parsed.get("usage")?.as_object()?;
+    let number = |name: &str| -> Option<u32> {
+        usage
+            .get(name)
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| u32::try_from(value).unwrap_or(u32::MAX))
+    };
+
+    let prompt_tokens = number("prompt_tokens").unwrap_or(0);
+    let completion_tokens = number("completion_tokens").unwrap_or(0);
+    let (cache_hit_tokens, cache_miss_tokens) = match (
+        number("prompt_cache_hit_tokens"),
+        number("prompt_cache_miss_tokens"),
+    ) {
+        (Some(hit), Some(miss)) => (hit, miss),
+        (None, None) => (0, prompt_tokens),
+        (Some(hit), None) => (hit, prompt_tokens.saturating_sub(hit)),
+        (None, Some(miss)) => (0, miss),
+    };
+
+    Some(LlmUsage {
+        prompt_tokens,
+        completion_tokens,
+        cache_hit_tokens,
+        cache_miss_tokens,
+    })
 }

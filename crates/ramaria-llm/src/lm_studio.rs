@@ -14,7 +14,7 @@
 use async_trait::async_trait;
 use futures::Stream;
 use ramaria_core::error::RamariaResult;
-use ramaria_core::traits::{ChatRequest, LlmProvider, StreamDelta};
+use ramaria_core::traits::{ChatRequest, LlmProvider, LlmUsage, StreamDelta};
 use ramaria_core::types::{BackendConfig, ModelCapability};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -80,6 +80,13 @@ impl LmStudioProvider {
 impl LlmProvider for LmStudioProvider {
     async fn chat(&self, request: &ChatRequest) -> RamariaResult<String> {
         self.base.chat(request).await
+    }
+
+    async fn chat_with_usage(
+        &self,
+        request: &ChatRequest,
+    ) -> RamariaResult<(String, Option<LlmUsage>)> {
+        self.base.chat_with_usage(request).await
     }
 
     async fn chat_vision(

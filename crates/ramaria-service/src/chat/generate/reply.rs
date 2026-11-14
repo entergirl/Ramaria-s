@@ -63,8 +63,9 @@ pub(crate) async fn reply_to_inbound(
         "社交通道回复生成开始（记忆检索与 Prompt 装配完成）"
     );
 
-    // ---- LLM 生成（失败不落库） ----
-    let reply = step_call_llm(engine, &prepared.chat_request, prepared.session_id).await?;
+    // ---- LLM 生成（失败不落库；本路径不需要用量） ----
+    let (reply, _usage) =
+        step_call_llm(engine, &prepared.chat_request, prepared.session_id).await?;
 
     // ---- 发送前检查：触发消息已撤回则回复作废（读取失败保守放行） ----
     if let Some(trigger_id) = trigger_message_id {

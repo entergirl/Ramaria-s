@@ -4,6 +4,7 @@
 //! - 覆盖 SSE 行解析各分支与流内 error 载荷上抛
 //! - 覆盖 http_error 状态码分类与响应体截断
 //! - 覆盖 chat_stream 请求 body（思考模式开关：默认禁用 / 显式开启）与 mock SSE 服务端链路
+//! - 覆盖非流式 mock 服务端链路：Content-Type 唯一性与 usage 段解析
 //! - 覆盖背压不丢 delta 与首事件 / 整体分级超时
 
 use super::*;
@@ -100,6 +101,53 @@ fn summarize_stream_error_string_and_fallback() {
 
     let fallback = summarize_stream_error(&serde_json::json!({"unexpected": 1}));
     assert_eq!(fallback, "[未知错误形态]");
+}
+
+// ---- usage_of（非流式响应用量解析）----
+
+/// DeepSeek 风格响应：四个数值直接取自 usage 段，命中率按输入占比。
+#[test]
+fn usage_of_reads_cache_fields() {
+    let parsed = serde_json::json!({
+        "choices": [{"message": {"content": "ok"}}],
+        "usage": {
+            "prompt_tokens": 1200,
+            "completion_tokens": 90,
+            "prompt_cache_hit_tokens": 1024,
+            "prompt_cache_miss_tokens": 176
+        }
+    });
+
+    let usage = usage_of(&parsed).expect("有 usage 段应解析成功");
+    assert_eq!(usage.prompt_tokens, 1200);
+    assert_eq!(usage.completion_tokens, 90);
+    assert_eq!(usage.cache_hit_tokens, 1024);
+    assert_eq!(usage.cache_miss_tokens, 176);
+    let rate = usage.cache_hit_rate().expect("输入非 0 应有命中率");
+    assert!((rate - 1024.0 / 1200.0).abs() < 1e-9, "命中率={rate}");
+}
+
+/// 缺缓存字段（OpenAI / LM Studio 口径）：hit = 0、miss = prompt_tokens。
+#[test]
+fn usage_of_defaults_missing_cache_fields_to_full_miss() {
+    let parsed = serde_json::json!({
+        "choices": [{"message": {"content": "ok"}}],
+        "usage": {"prompt_tokens": 800, "completion_tokens": 40}
+    });
+
+    let usage = usage_of(&parsed).expect("有 usage 段应解析成功");
+    assert_eq!(usage.prompt_tokens, 800);
+    assert_eq!(usage.completion_tokens, 40);
+    assert_eq!(usage.cache_hit_tokens, 0, "缺字段按未命中记");
+    assert_eq!(usage.cache_miss_tokens, 800, "未命中等于全部输入");
+    assert_eq!(usage.cache_hit_rate(), Some(0.0));
+}
+
+/// 完全没有 usage 段：返回 None（上层按"无用用量信息"处理）。
+#[test]
+fn usage_of_returns_none_without_usage_block() {
+    let parsed = serde_json::json!({"choices": [{"message": {"content": "ok"}}]});
+    assert!(usage_of(&parsed).is_none());
 }
 
 // ---- http_error ----
@@ -294,6 +342,126 @@ async fn chat_stream_body_enables_thinking_when_requested() {
     );
     assert_eq!(body["temperature"], 1.0, "temperature 应透传");
     assert_eq!(body["max_tokens"], 4096, "max_tokens 应透传");
+}
+
+// ---- chat 非流式请求 ----
+
+/// 启动本地 mock 非流式 server：记录请求头中 Content-Type 的全部取值，
+/// 返回一条带完整 usage 段（四个字段含缓存命中/未命中）的 chat completion JSON。
+/// 返回 `(base_url, 捕获的 Content-Type 取值列表)`。
+async fn spawn_mock_chat_server() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("绑定 mock 端口应成功");
+    let addr = listener.local_addr().expect("获取 mock 地址应成功");
+    let captured: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured_clone = std::sync::Arc::clone(&captured);
+
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (mut socket, _) = listener.accept().await.expect("mock 应收到连接");
+
+        // 读取完整请求：先读到头部结束（\r\n\r\n），再按 Content-Length 补齐 body
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 2048];
+        let header_end = loop {
+            let n = socket.read(&mut tmp).await.expect("mock 读请求头应成功");
+            if n == 0 {
+                break None;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break Some(pos + 4);
+            }
+        };
+        let header_end = header_end.expect("mock 应收到请求头");
+        let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+        let content_len: usize = head
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+            .and_then(|l| l.split_once(':').map(|(_, v)| v.trim().parse().ok()))
+            .flatten()
+            .unwrap_or(0);
+        while buf.len() < header_end + content_len {
+            let n = socket.read(&mut tmp).await.expect("mock 读 body 应成功");
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+
+        // 收集 Content-Type 的全部取值：同名头若重复发送会出现多行，
+        // 单行内也可能以逗号合并多个值，两种形态都要展开。
+        let content_types: Vec<String> = head
+            .lines()
+            .filter_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.trim()
+                    .eq_ignore_ascii_case("content-type")
+                    .then(|| value.split(',').map(|v| v.trim().to_string()))
+            })
+            .flatten()
+            .filter(|v| !v.is_empty())
+            .collect();
+        *captured_clone.lock().expect("mock 捕获锁应可用") = content_types;
+
+        let body_json = concat!(
+            r#"{"id":"chatcmpl-mock","object":"chat.completion","#,
+            r#""choices":[{"index":0,"message":{"role":"assistant","content":"你好"},"finish_reason":"stop"}],"#,
+            r#""usage":{"prompt_tokens":1200,"completion_tokens":90,"#,
+            r#""prompt_cache_hit_tokens":1024,"prompt_cache_miss_tokens":176}}"#
+        );
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body_json.len(),
+            body_json
+        );
+        socket
+            .write_all(resp.as_bytes())
+            .await
+            .expect("mock 写响应应成功");
+        let _ = socket.shutdown().await;
+    });
+
+    (format!("http://{}", addr), captured)
+}
+
+/// 非流式请求必须只带一个 Content-Type 头（值为 application/json），
+/// 并顺带验证响应 usage 段四个字段的解析。
+///
+/// 背景:
+/// - 发送路径曾在 `.json(body)` 之后又显式追加 Content-Type，形成重复头
+///   （`[application/json, application/json]`）；DeepSeek 网关按缺头处理，
+///   直接返回 HTTP 415 "Expected request with Content-Type: application/json"。
+/// - 通过 mock server 检查服务端实际收到的请求头，锁住唯一性。
+#[tokio::test]
+async fn chat_sends_single_content_type_and_parses_usage() {
+    let (base_url, captured) = spawn_mock_chat_server().await;
+    let transport =
+        OpenAiTransport::new(base_url, Some("test-key".into()), 5).expect("构造 transport 应成功");
+
+    let messages = vec![serde_json::json!({"role": "user", "content": "你好"})];
+    let (content, usage) = transport
+        .chat(&messages, "deepseek-chat", 0.0, 512, None)
+        .await
+        .expect("chat 应成功");
+
+    assert_eq!(content, "你好", "应返回 mock 的 assistant 内容");
+
+    let content_types = captured.lock().expect("捕获锁应可用").clone();
+    assert_eq!(
+        content_types,
+        vec!["application/json".to_string()],
+        "Content-Type 必须恰好一个且为 application/json"
+    );
+
+    let usage = usage.expect("响应含 usage 段应解析成功");
+    assert_eq!(usage.prompt_tokens, 1200, "prompt_tokens 应解析");
+    assert_eq!(usage.completion_tokens, 90, "completion_tokens 应解析");
+    assert_eq!(usage.cache_hit_tokens, 1024, "cache_hit_tokens 应解析");
+    assert_eq!(usage.cache_miss_tokens, 176, "cache_miss_tokens 应解析");
 }
 
 // =========================================================

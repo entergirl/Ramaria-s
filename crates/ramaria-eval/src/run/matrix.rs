@@ -4,6 +4,8 @@
 //! - 矩阵按 TOML 声明：四个轴与可选参数显式写全，缺省值只在字段级定义
 //! - 条件标识由档位、管线、预算与模型序号拼成，展开顺序固定且可复现
 //! - 管线枚举固定七种消融形态，掩码只在评测侧做减法，不改变产品默认
+//! - 判分模型独立声明：缺省时判分回退首个答题模型，字段口径与答题模型一致
+//! - 题量上限与分层抽样互斥：二选一，均在解析阶段校验
 //! - 解析失败一律返回校验错误，文案带文件路径与字段名
 //! - 只描述数据，不装配引擎、不读取语料
 
@@ -27,11 +29,14 @@ pub const DEFAULT_RETRY_LIMIT: u32 = 2;
 ///
 /// 字段约定:
 /// - `run`: 运行轴（语料、档位、管线、预算与运行选项）；
-/// - `answer_models`: 答题模型列表，条件按序号引用。
+/// - `answer_models`: 答题模型列表，条件按序号引用；
+/// - `judge`: 可选判分模型；缺省时判分回退 `answer_models[0]`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunMatrix {
     pub run: RunSection,
     pub answer_models: Vec<AnswerModel>,
+    #[serde(default)]
+    pub judge: Option<JudgeModel>,
 }
 
 /// 运行轴与运行选项。
@@ -42,6 +47,7 @@ pub struct RunMatrix {
 /// - `pipelines`: 管线组合，非空；
 /// - `budgets`: 注入预算（字符），每项大于 0；
 /// - `question_limit`: 每档题集截断上限，`None` 表示不限；
+/// - `question_sample`: 每档分层抽样题数，`None` 表示不抽样；与 `question_limit` 互斥；
 /// - `strict_isolation`: 是否按条件复制基线库；
 /// - `retry_limit`: 单题失败重试次数，允许 0。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -53,6 +59,8 @@ pub struct RunSection {
     pub budgets: Vec<u32>,
     #[serde(default)]
     pub question_limit: Option<usize>,
+    #[serde(default)]
+    pub question_sample: Option<usize>,
     #[serde(default)]
     pub strict_isolation: bool,
     #[serde(default = "default_retry_limit")]
@@ -72,6 +80,18 @@ pub struct AnswerModel {
     pub model: String,
 }
 
+/// 判分模型声明。
+///
+/// 字段约定:
+/// - 与 `AnswerModel` 同口径：云端 `base_url` / `model` 必填，本地 `model` 可留空；
+/// - 只描述判分调用要用的后端，不承载采样次数与投票策略。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JudgeModel {
+    pub kind: AnswerModelKind,
+    pub base_url: String,
+    pub model: String,
+}
+
 /// 答题模型类别（可见文本只区分本地与云端）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -85,8 +105,10 @@ pub enum AnswerModelKind {
 /// 注入管线组合。
 ///
 /// 状态:
-/// - 七个变体覆盖分层全开、逐层消融、flat-RAG 与 full-context；
+/// - 八个变体覆盖分层全开、逐层消融、flat-RAG、full-context 与 oracle 预置上下文；
 /// - `mask()` 只做减法：开启不等于必然注入，配置闸门与检索命中照常生效。
+///
+/// 说明: `OracleL1` 不出现在矩阵文件里，只由 oracle 子命令在冻结矩阵时替换得到。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Pipeline {
     /// 九层全开（等价产品默认注入面）
@@ -110,6 +132,9 @@ pub enum Pipeline {
     /// 不召回，由运行器注入全量上下文
     #[serde(rename = "full-context")]
     FullContext,
+    /// 不召回，由运行器注入 gold 覆盖到的 L1 摘要（压缩层 oracle）
+    #[serde(rename = "oracle-l1")]
+    OracleL1,
 }
 
 impl Pipeline {
@@ -123,6 +148,7 @@ impl Pipeline {
             Self::L1L2L3Utt => "l1-l2-l3-utt",
             Self::FlatRag => "flat-rag",
             Self::FullContext => "full-context",
+            Self::OracleL1 => "oracle-l1",
         }
     }
 
@@ -131,7 +157,7 @@ impl Pipeline {
     /// 返回:
     /// - 记忆四路按变体开关，其余注入层（知识 / 脉络 / 行为 / 风格 / 示例）关闭；
     /// - `Layered` 返回 `EvalInjectionMask::all()`；
-    /// - `FullContext` 返回全关掩码（上下文由运行器另行注入）。
+    /// - `FullContext` / `OracleL1` 返回全关掩码（上下文由运行器另行注入）。
     pub fn mask(&self) -> EvalInjectionMask {
         match self {
             Self::Layered => EvalInjectionMask::all(),
@@ -140,7 +166,7 @@ impl Pipeline {
             Self::L1L2L3 => memory_mask(true, true, true, false),
             Self::L1L2L3Utt => memory_mask(true, true, true, true),
             Self::FlatRag => memory_mask(false, false, false, true),
-            Self::FullContext => memory_mask(false, false, false, false),
+            Self::FullContext | Self::OracleL1 => memory_mask(false, false, false, false),
         }
     }
 }
@@ -228,7 +254,7 @@ impl RunMatrix {
         Ok(matrix)
     }
 
-    /// 校验轴的取值范围与答题模型必填项。
+    /// 校验轴的取值范围、答题模型与判分模型必填项。
     ///
     /// 说明:
     /// - 校验失败返回字段级原因，由 `load` 补上文件路径；
@@ -241,6 +267,11 @@ impl RunMatrix {
         if run.pipelines.is_empty() {
             return Err("run.pipelines 不能为空".to_string());
         }
+        if run.pipelines.contains(&Pipeline::OracleL1) {
+            return Err(
+                "run.pipelines 不能包含 oracle-l1：该管线只能由 eval oracle 生成".to_string(),
+            );
+        }
         if run.budgets.is_empty() {
             return Err("run.budgets 不能为空".to_string());
         }
@@ -249,6 +280,12 @@ impl RunMatrix {
         }
         if run.question_limit == Some(0) {
             return Err("run.question_limit 必须大于 0".to_string());
+        }
+        if run.question_sample == Some(0) {
+            return Err("run.question_sample 必须大于 0".to_string());
+        }
+        if run.question_sample.is_some() && run.question_limit.is_some() {
+            return Err("run.question_sample 与 run.question_limit 不能同时设置".to_string());
         }
         for (index, answer_model) in self.answer_models.iter().enumerate() {
             if answer_model.kind != AnswerModelKind::Cloud {
@@ -259,6 +296,16 @@ impl RunMatrix {
             }
             if answer_model.model.trim().is_empty() {
                 return Err(format!("answer_models[{index}].model 不能为空"));
+            }
+        }
+        if let Some(judge) = &self.judge {
+            if judge.kind == AnswerModelKind::Cloud {
+                if judge.base_url.trim().is_empty() {
+                    return Err("judge.base_url 不能为空".to_string());
+                }
+                if judge.model.trim().is_empty() {
+                    return Err("judge.model 不能为空".to_string());
+                }
             }
         }
         Ok(())

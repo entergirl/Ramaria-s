@@ -49,16 +49,30 @@ pub(crate) fn eval_command(args: &EvalArgs) -> Option<EvalCommand> {
             tier,
             language,
             output,
+            artifacts,
         } => EvalCommand::Baseline {
             corpus: corpus.clone(),
             tier: tier.clone(),
             language: language.clone(),
             output: output.clone(),
+            artifacts: *artifacts,
         },
-        EvalCmd::Score { run_id } => EvalCommand::Score {
+        EvalCmd::Score { run_id, no_judge } => EvalCommand::Score {
             run_id: run_id.clone(),
+            no_judge: *no_judge,
         },
-        EvalCmd::Report { run_id, output } => EvalCommand::Report {
+        EvalCmd::Report {
+            run_id,
+            oracle,
+            compare,
+            output,
+        } => EvalCommand::Report {
+            run_id: run_id.clone(),
+            oracle: oracle.clone(),
+            compare: compare.clone(),
+            output: output.clone(),
+        },
+        EvalCmd::Oracle { run_id, output } => EvalCommand::Oracle {
             run_id: run_id.clone(),
             output: output.clone(),
         },
@@ -660,6 +674,7 @@ mod tests {
     fn eval_context_rejects_backend_options_with_subcommand() {
         let mut eval = args(Some(EvalCmd::Score {
             run_id: "r".to_string(),
+            no_judge: false,
         }));
         eval.backend = BackendModeArg::Cloud;
         let error = eval_context(&eval, PathBuf::from("u.db")).expect_err("应拒绝");

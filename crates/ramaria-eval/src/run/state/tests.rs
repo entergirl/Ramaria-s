@@ -40,6 +40,7 @@ fn matrix(budgets: Vec<u32>) -> RunMatrix {
             pipelines: vec![Pipeline::Layered],
             budgets,
             question_limit: None,
+            question_sample: None,
             strict_isolation: false,
             retry_limit: 2,
         },
@@ -48,6 +49,7 @@ fn matrix(budgets: Vec<u32>) -> RunMatrix {
             base_url: "http://127.0.0.1:1234/v1".to_string(),
             model: "local-model".to_string(),
         }],
+        judge: None,
     }
 }
 

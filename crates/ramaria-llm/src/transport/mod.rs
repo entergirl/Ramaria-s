@@ -18,6 +18,9 @@ mod tests;
 pub use client::OpenAiTransport;
 
 #[cfg(test)]
+pub(crate) use client::usage_of;
+
+#[cfg(test)]
 pub(crate) use error::http_error;
 
 #[cfg(test)]

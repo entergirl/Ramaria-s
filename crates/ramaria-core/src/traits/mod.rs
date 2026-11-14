@@ -16,7 +16,7 @@ mod store_version;
 
 pub use cache::LlmResponseCache;
 pub use embedding::{Embedding, EmbeddingModelInfo, EmbeddingProvider, EmbeddingTruncation};
-pub use llm::{ChatMessage, ChatRequest, LlmProvider, StreamDelta};
+pub use llm::{ChatMessage, ChatRequest, LlmProvider, LlmUsage, StreamDelta};
 pub use store_backend::{StorageBackend, StoreInfrastructure};
 pub use store_crud::{ProactiveDeliveryPair, StoreCrud};
 pub use store_version::{

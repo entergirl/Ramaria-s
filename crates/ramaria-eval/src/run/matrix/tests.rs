@@ -3,7 +3,7 @@
 //! 设计特点:
 //! - TOML 夹具落到临时文件，覆盖解析、缺省值与路径化报错
 //! - 条件展开按四轴顺序逐一比对标识，并锁定唯一性
-//! - 七种管线的稳定标识、序列化与掩码逐项断言
+//! - 八种管线的稳定标识、序列化与掩码逐项断言
 //! - 校验失败覆盖空轴、零预算、零题限与云端缺项
 
 use std::collections::HashSet;
@@ -72,6 +72,7 @@ fn load_reads_axes_and_defaults() {
     assert_eq!(matrix.run.pipelines, vec![Pipeline::Layered]);
     assert_eq!(matrix.run.budgets, vec![400]);
     assert_eq!(matrix.run.question_limit, None, "缺省不限制题量");
+    assert_eq!(matrix.run.question_sample, None, "缺省不抽样");
     assert!(!matrix.run.strict_isolation, "缺省非严格隔离");
     assert_eq!(matrix.run.retry_limit, DEFAULT_RETRY_LIMIT);
     assert_eq!(matrix.answer_models.len(), 1);
@@ -92,6 +93,57 @@ fn load_applies_explicit_options() {
     assert_eq!(matrix.run.question_limit, Some(20));
     assert!(matrix.run.strict_isolation);
     assert_eq!(matrix.run.retry_limit, 0);
+    cleanup(&dir);
+}
+
+/// 抽样预算可单独声明；与题量上限互斥，零预算被拒绝。
+#[test]
+fn question_sample_parses_and_conflicts_with_limit() {
+    let dir = temp_dir("sample-ok");
+    let text = MINIMAL.replace("budgets = [400]", "budgets = [400]\nquestion_sample = 300");
+    let matrix = load_text(&dir, &text).expect("抽样预算应可加载");
+    assert_eq!(matrix.run.question_sample, Some(300));
+    assert_eq!(matrix.run.question_limit, None);
+    cleanup(&dir);
+
+    let dir = temp_dir("sample-zero");
+    let path = write_matrix(
+        &dir,
+        &toml_with(
+            "[\"u1-m1\"]",
+            "[\"layered\"]",
+            "[400]",
+            "question_sample = 0",
+        ),
+    );
+    let error = RunMatrix::load(&path).expect_err("零预算应报错");
+    assert!(
+        error.to_string().contains("run.question_sample 必须大于 0"),
+        "文案应指明字段，实际 {error}"
+    );
+    cleanup(&dir);
+
+    let dir = temp_dir("sample-conflict");
+    let path = write_matrix(
+        &dir,
+        &toml_with(
+            "[\"u1-m1\"]",
+            "[\"layered\"]",
+            "[400]",
+            "question_limit = 20\nquestion_sample = 300",
+        ),
+    );
+    let error = RunMatrix::load(&path).expect_err("两个选项同时出现应报错");
+    assert!(
+        matches!(&error, RamariaError::Validation { .. }),
+        "应为 Validation，实际 {error:?}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("run.question_sample 与 run.question_limit 不能同时设置"),
+        "文案应指明互斥字段，实际 {error}"
+    );
     cleanup(&dir);
 }
 
@@ -219,6 +271,61 @@ model = "cloud-model"
 }
 
 // =========================================================
+// 判分模型
+// =========================================================
+
+/// `[judge]` 段按答题模型口径解析，缺省时不产出判分模型。
+#[test]
+fn judge_section_parses_with_answer_model_contract() {
+    let dir = temp_dir("judge-ok");
+    let text = MINIMAL.replace(
+        "model = \"google/gemma-4-e4b\"",
+        "model = \"google/gemma-4-e4b\"\n\n[judge]\nkind = \"cloud\"\nbase_url = \"https://api.example.com/v1\"\nmodel = \"judge-model\"",
+    );
+    let matrix = load_text(&dir, &text).expect("带判分模型的矩阵应可加载");
+    let judge = matrix.judge.expect("judge 段应被解析");
+    assert_eq!(judge.kind, AnswerModelKind::Cloud);
+    assert_eq!(judge.base_url, "https://api.example.com/v1");
+    assert_eq!(judge.model, "judge-model");
+    cleanup(&dir);
+
+    let dir = temp_dir("judge-none");
+    let matrix = load_text(&dir, MINIMAL).expect("矩阵应可加载");
+    assert!(matrix.judge.is_none(), "缺省不声明判分模型");
+    cleanup(&dir);
+}
+
+/// 云端判分模型缺地址或模型标识被拒绝，文案带字段名。
+#[test]
+fn cloud_judge_requires_address_and_model() {
+    let cloud = MINIMAL.replace(
+        "model = \"google/gemma-4-e4b\"",
+        "model = \"google/gemma-4-e4b\"\n\n[judge]\nkind = \"cloud\"\nbase_url = \"\"\nmodel = \"judge-model\"",
+    );
+    let dir = temp_dir("judge-url");
+    let error = load_text(&dir, &cloud).expect_err("云端判分模型缺地址应报错");
+    assert!(
+        error.to_string().contains("judge.base_url"),
+        "文案应含字段名，实际 {error}"
+    );
+    cleanup(&dir);
+
+    let dir = temp_dir("judge-model");
+    let text = cloud
+        .replace(
+            "base_url = \"\"",
+            "base_url = \"https://api.example.com/v1\"",
+        )
+        .replace("model = \"judge-model\"", "model = \"\"");
+    let error = load_text(&dir, &text).expect_err("云端判分模型缺模型应报错");
+    assert!(
+        error.to_string().contains("judge.model"),
+        "文案应含字段名，实际 {error}"
+    );
+    cleanup(&dir);
+}
+
+// =========================================================
 // 条件展开
 // =========================================================
 
@@ -299,7 +406,27 @@ model = "cloud-b"
 // 管线标识与掩码
 // =========================================================
 
-/// 七种管线的稳定标识、序列化与反序列化一致。
+/// 矩阵文件不允许声明 oracle 管线：它只能由 eval oracle 生成。
+#[test]
+fn load_rejects_oracle_pipeline() {
+    let dir = temp_dir("oracle");
+    let error = load_text(
+        &dir,
+        &toml_with("[\"u1-m1\"]", "[\"oracle-l1\"]", "[400]", ""),
+    )
+    .expect_err("oracle 管线应被拒绝");
+    assert!(
+        matches!(&error, RamariaError::Validation { .. }),
+        "应为 Validation，实际 {error:?}"
+    );
+    assert!(
+        error.to_string().contains("oracle-l1"),
+        "文案应指明管线，实际 {error}"
+    );
+    cleanup(&dir);
+}
+
+/// 八种管线的稳定标识、序列化与反序列化一致。
 #[test]
 fn pipeline_ids_roundtrip() {
     for (pipeline, id, _) in pipeline_cases() {
@@ -311,7 +438,7 @@ fn pipeline_ids_roundtrip() {
     }
 }
 
-/// 七种管线的掩码逐字段匹配变体语义。
+/// 八种管线的掩码逐字段匹配变体语义。
 #[test]
 fn pipeline_masks_match_variants() {
     for (pipeline, id, expected) in pipeline_cases() {
@@ -338,7 +465,7 @@ fn mask_flags(mask: EvalInjectionMask) -> [bool; 9] {
     ]
 }
 
-fn pipeline_cases() -> [(Pipeline, &'static str, [bool; 9]); 7] {
+fn pipeline_cases() -> [(Pipeline, &'static str, [bool; 9]); 8] {
     [
         (Pipeline::Layered, "layered", [true; 9]),
         (
@@ -367,5 +494,6 @@ fn pipeline_cases() -> [(Pipeline, &'static str, [bool; 9]); 7] {
             [false, false, false, true, false, false, false, false, false],
         ),
         (Pipeline::FullContext, "full-context", [false; 9]),
+        (Pipeline::OracleL1, "oracle-l1", [false; 9]),
     ]
 }

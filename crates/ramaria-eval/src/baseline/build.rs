@@ -40,7 +40,9 @@ use stage::{create_personas, ingest_sample, window_counts};
 const CHANNEL: &str = "eval";
 
 /// 外部对话标识前缀（后接 user_key 与日期）。
-const CONVERSATION_PREFIX: &str = "lifebench";
+///
+/// 供 artifact 映射采集复用：两侧必须用同一前缀定位会话。
+pub(super) const CONVERSATION_PREFIX: &str = "lifebench";
 
 /// 构建目录下的人格文件子目录。
 const PERSONA_DIR: &str = "personas";
@@ -125,7 +127,10 @@ pub(crate) async fn run_step(
     if reused.iter().all(Option::is_some) {
         let artifacts: Vec<BaselineArtifact> = reused.iter().flatten().cloned().collect();
         for artifact in &artifacts {
-            eprintln!("档位 {}: 产物已存在且指纹匹配，跳过", artifact.tier_id);
+            eprintln!(
+                "档位 {}: 产物已存在且指纹匹配，跳过（artifact 映射可用 ramaria eval baseline --artifacts --tier {} 回填）",
+                artifact.tier_id, artifact.tier_id
+            );
         }
         return Ok(artifacts);
     }
@@ -315,7 +320,10 @@ async fn build_with(
     // 续跑时前缀检查点不再重写：直接沿用其摘要（这些档位目录在本次构建中保持不变）。
     let mut artifacts: Vec<BaselineArtifact> = Vec::new();
     for summary in reused.iter().flatten() {
-        eprintln!("档位 {}: 产物已存在且指纹匹配，跳过", summary.tier_id);
+        eprintln!(
+            "档位 {}: 产物已存在且指纹匹配，跳过（artifact 映射可用 ramaria eval baseline --artifacts --tier {} 回填）",
+            summary.tier_id, summary.tier_id
+        );
         artifacts.push(summary.clone());
     }
 

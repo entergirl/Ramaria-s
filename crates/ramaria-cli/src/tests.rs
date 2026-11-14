@@ -246,6 +246,7 @@ fn eval_subcommands_parse() {
         "en",
         "--output",
         "out/base",
+        "--artifacts",
     ])
     .expect("eval baseline 应可解析");
     match cli.command {
@@ -256,6 +257,7 @@ fn eval_subcommands_parse() {
                     tier,
                     language,
                     output,
+                    artifacts,
                 }),
             ..
         }) => {
@@ -263,15 +265,36 @@ fn eval_subcommands_parse() {
             assert_eq!(tier.as_deref(), Some("u1-y1"));
             assert_eq!(language.as_deref(), Some("en"));
             assert_eq!(output, Some(PathBuf::from("out/base")));
+            assert!(artifacts, "应解析出 artifact 映射回填开关");
         }
         _ => panic!("应解析为 Eval::Baseline，实际解析为其他命令"),
+    }
+
+    let cli = Cli::try_parse_from([
+        "ramaria",
+        "eval",
+        "oracle",
+        "run-1",
+        "--output",
+        "out/oracle",
+    ])
+    .expect("eval oracle 应可解析");
+    match cli.command {
+        Commands::Eval(EvalArgs {
+            command: Some(EvalCmd::Oracle { run_id, output }),
+            ..
+        }) => {
+            assert_eq!(run_id, "run-1");
+            assert_eq!(output, Some(PathBuf::from("out/oracle")));
+        }
+        _ => panic!("应解析为 Eval::Oracle，实际解析为其他命令"),
     }
 
     let cli =
         Cli::try_parse_from(["ramaria", "eval", "score", "run-1"]).expect("eval score 应可解析");
     match cli.command {
         Commands::Eval(EvalArgs {
-            command: Some(EvalCmd::Score { run_id }),
+            command: Some(EvalCmd::Score { run_id, .. }),
             ..
         }) => assert_eq!(run_id, "run-1"),
         _ => panic!("应解析为 Eval::Score，实际解析为其他命令"),

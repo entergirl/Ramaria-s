@@ -14,13 +14,16 @@
 //! - 模型文件管理：根目录解析 / 列表 / 就绪与体积查询 / 删除 / 下载均委派
 //!   `ramaria-llm` 模型管理器，本层只做编排与错误分类
 //! - 安全约束：API key 只经 OS keychain 读写（本地 provider 跳过），日志不记密钥内容
+//! - 评测出口：按显式后端配置构造独立 provider，不需要引擎实例，不落库也不热替换；
+//!   可选进程内密钥覆盖（评测专用密钥），密钥只留在内存，不写 keychain 与配置文件
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ramaria_core::error::{RamariaError, RamariaResult};
-use ramaria_core::traits::EmbeddingProvider;
+use ramaria_core::traits::{EmbeddingProvider, LlmProvider as LlmProviderTrait};
 use ramaria_core::types::{AppState, BackendConfig, LlmProvider};
+use ramaria_llm::keychain::Keychain;
 use ramaria_llm::model_manager::{ModelManager, ProgressCallback};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
@@ -215,6 +218,54 @@ fn path_log_label(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+// =========================================================
+// 评测 provider 出口
+// =========================================================
+
+/// 按给定后端配置构造评测专用 LLM provider（无副作用出口）。
+///
+/// 参数:
+/// - `config`: 本次判分要使用的后端配置（provider / base_url / model）。
+///
+/// 返回:
+/// - 成功时返回独立构造的 provider；配置非法或密钥缺失返回对应错误。
+///
+/// 说明:
+/// - 不依赖引擎实例：判分可能没有工作库（严格隔离外的旧运行、无库降级场景），无法装配 `Engine`；
+/// - keychain 句柄在此自建，只做只读密钥读取，不落库、不热替换、不写配置文件；
+/// - 不注入响应缓存：判分需要对同一提示词独立采样多次，命中缓存会抹平投票差异。
+pub fn eval_llm(config: &BackendConfig) -> RamariaResult<Arc<dyn LlmProviderTrait>> {
+    eval_llm_with_key(config, None)
+}
+
+/// 按给定后端配置构造评测专用 provider，可注入进程内密钥覆盖。
+///
+/// 参数:
+/// - `config`: 本次要使用的后端配置（provider / base_url / model）；
+/// - `api_key`: 可选密钥覆盖；`None` 或空白等价于 eval_llm（只读系统 keychain）。
+///
+/// 返回:
+/// - 成功时返回独立构造的 provider；配置非法或密钥缺失返回对应错误。
+///
+/// 说明:
+/// - 覆盖密钥只进内存（`Keychain::with_override`），不写 keychain、不落库、不写配置文件；
+/// - 本地 provider 不需要密钥，传入覆盖值也不使用；
+/// - 其余口径与 eval_llm 一致：无引擎依赖、不注入响应缓存。
+pub fn eval_llm_with_key(
+    config: &BackendConfig,
+    api_key: Option<&str>,
+) -> RamariaResult<Arc<dyn LlmProviderTrait>> {
+    let override_key = api_key.map(str::trim).filter(|value| !value.is_empty());
+    let keychain = match override_key {
+        Some(key) if config.provider.is_online() => {
+            let service = keychain_service(config.provider)?;
+            Arc::new(Keychain::with_override(service, key))
+        }
+        _ => Arc::new(Keychain::new()),
+    };
+    build_llm_provider(config, &keychain, None)
 }
 
 // =========================================================

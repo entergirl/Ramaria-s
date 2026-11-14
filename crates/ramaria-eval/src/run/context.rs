@@ -55,7 +55,12 @@ pub async fn build_full_context(
 }
 
 /// 分页取回某人格的全部 L1 摘要。
-async fn collect_l1(engine: &Engine, persona_uid: &str) -> RamariaResult<Vec<L1MemoryView>> {
+///
+/// 说明: 同 crate 的 oracle 上下文复用本函数与 [`render`]，避免出现第二份取数 / 裁剪实现。
+pub(super) async fn collect_l1(
+    engine: &Engine,
+    persona_uid: &str,
+) -> RamariaResult<Vec<L1MemoryView>> {
     let mut views = Vec::new();
     let mut offset = 0u32;
     loop {
@@ -81,7 +86,9 @@ async fn collect_l1(engine: &Engine, persona_uid: &str) -> RamariaResult<Vec<L1M
 // =========================================================
 
 /// 按预算裁剪后渲染为固定文本块。
-fn render(views: &[L1MemoryView], budget_chars: usize) -> String {
+///
+/// 说明: 传入视图须已按时间升序排好；裁剪从最早条目开始整条丢弃。
+pub(super) fn render(views: &[L1MemoryView], budget_chars: usize) -> String {
     let lines: Vec<String> = views
         .iter()
         .enumerate()

@@ -5,12 +5,14 @@
 //! - 抽象 LM Studio、DeepSeek、OpenAI 等 provider 的统一聊天能力
 //! - 统一 request_id、delta、done 与 metadata 的流式语义
 //! - 提供非流式/流式入口及能力、配置、校验与健康检查默认实现
+//! - 非流式调用的 token 用量随本次调用返回，缓存命中占比由调用方按需计算
 //! - 不记录 API key、完整 prompt 或完整用户消息
 
 use std::pin::Pin;
 
 use async_trait::async_trait;
 use futures::Stream;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::RamariaResult;
@@ -95,6 +97,65 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+/// 单次非流式调用的 token 用量。
+///
+/// 字段约定:
+/// - `prompt_tokens` / `completion_tokens`: 输入 / 输出 token 数（provider 原值）；
+/// - `cache_hit_tokens` / `cache_miss_tokens`: 输入中命中 / 未命中 provider 侧上下文缓存的部分。
+///
+/// 说明:
+/// - 只有返回缓存字段的 provider 才给得出真实值；缺字段的 provider 按
+///   `cache_hit_tokens = 0`、`cache_miss_tokens = prompt_tokens` 记（未知按全 miss）；
+/// - 结构只承载数值，不含提示词与回复文本。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmUsage {
+    /// 输入 token 数
+    pub prompt_tokens: u32,
+    /// 输出 token 数
+    pub completion_tokens: u32,
+    /// 输入中命中上下文缓存的 token 数
+    pub cache_hit_tokens: u32,
+    /// 输入中未命中上下文缓存的 token 数
+    pub cache_miss_tokens: u32,
+}
+
+impl LlmUsage {
+    /// 累加另一次调用的用量。
+    ///
+    /// 说明: 逐字段饱和相加，溢出时停在字段上界而不是 panic（只用于观测统计）。
+    pub fn add(&mut self, other: LlmUsage) {
+        self.prompt_tokens = self.prompt_tokens.saturating_add(other.prompt_tokens);
+        self.completion_tokens = self
+            .completion_tokens
+            .saturating_add(other.completion_tokens);
+        self.cache_hit_tokens = self.cache_hit_tokens.saturating_add(other.cache_hit_tokens);
+        self.cache_miss_tokens = self
+            .cache_miss_tokens
+            .saturating_add(other.cache_miss_tokens);
+    }
+
+    /// 输入 token 的缓存命中占比。
+    ///
+    /// 返回:
+    /// - `Some(0.0..=1.0)`: `cache_hit_tokens / (cache_hit_tokens + cache_miss_tokens)`；
+    /// - `None`: 输入 token 计为 0（无调用或 provider 未返回用量），命中率无定义。
+    pub fn cache_hit_rate(&self) -> Option<f64> {
+        let total = u64::from(self.cache_hit_tokens) + u64::from(self.cache_miss_tokens);
+        if total == 0 {
+            return None;
+        }
+        Some(self.cache_hit_tokens as f64 / total as f64)
+    }
+
+    /// 四个计数是否全为 0（等价于"没有用量信息"）。
+    pub fn is_empty(&self) -> bool {
+        self.prompt_tokens == 0
+            && self.completion_tokens == 0
+            && self.cache_hit_tokens == 0
+            && self.cache_miss_tokens == 0
+    }
+}
+
 /// LLM Provider 抽象 trait。
 ///
 /// 职责:
@@ -116,7 +177,33 @@ pub trait LlmProvider: Send + Sync {
     /// 返回:
     /// - 成功时返回完整 assistant 文本。
     /// - 失败时返回统一错误类型。
+    ///
+    /// 说明: 需要 token 用量时改用 `chat_with_usage`；本入口丢弃用量。
     async fn chat(&self, request: &ChatRequest) -> RamariaResult<String>;
+
+    /// 执行非流式聊天完成请求，并返回本次调用的 token 用量。
+    ///
+    /// 职责:
+    /// - 用量属于单次调用，随返回值一同返回，不做跨调用的共享槽位。
+    ///
+    /// 参数:
+    /// - `request`: 完整聊天请求。
+    ///
+    /// 返回:
+    /// - `(text, Some(usage))`: 本次调用真的发到了模型且 provider 返回了用量；
+    /// - `(text, None)`: 未实现该能力、provider 未返回用量或命中产品响应缓存
+    ///   （缓存命中不产生模型调用，因此没有用量）。
+    ///
+    /// 说明:
+    /// - 默认实现委托 `chat` 并返回 `None`，不产生额外调用；
+    /// - 并发安全：每次调用只对应自己那份用量，调用方各自累加即可，互不覆盖；
+    /// - 流式路径不上报用量（SSE 增量里的 usage 分片不在本抽象内解析）。
+    async fn chat_with_usage(
+        &self,
+        request: &ChatRequest,
+    ) -> RamariaResult<(String, Option<LlmUsage>)> {
+        Ok((self.chat(request).await?, None))
+    }
 
     /// 执行流式聊天完成请求。
     ///

@@ -6,7 +6,9 @@
 //! - 预置上下文用于 full-context 对照：`Some` 时跳过召回直接注入，`None` 时走常规召回
 //! - 观测只记分层 / 标识 / 分数 / 字数 / token，不含记忆原文与提示词文本
 //! - 产物侧结构可序列化，矩阵文件可反序列化选项（枚举为纯 bool 字段，缺项即解析失败）
+//! - 生成结果携带 provider 上报的 token 用量（含缓存命中），只存数值不存文本
 
+use ramaria_core::traits::LlmUsage;
 use ramaria_memory::trace::RecallTrace;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -153,11 +155,14 @@ pub struct EvalRecallObservation {
 /// - `reply`: 人格回复全文；
 /// - `session_id`: 本轮对话所属会话（复用或新建）；
 /// - `chars`: 回复字符数；
-/// - `recall`: 本轮召回观测（无召回时为空观测，不省略字段）。
+/// - `recall`: 本轮召回观测（无召回时为空观测，不省略字段）；
+/// - `usage`: 本次生成的 token 用量；provider 未上报或缓存命中时为 `None`（旧产物缺该键）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalChatOutcome {
     pub reply: String,
     pub session_id: Uuid,
     pub chars: usize,
     pub recall: EvalRecallObservation,
+    #[serde(default)]
+    pub usage: Option<LlmUsage>,
 }

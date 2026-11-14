@@ -4,13 +4,14 @@
 //! - `ProviderBase`: 封装 HTTP 传输、消息组装、重试/超时策略与可选 LLM 响应缓存
 //! - 手动 `Debug`：缓存为 trait object，仅输出是否启用；API key 不进入 Debug 输出
 //! - `with_retry`: 指数退避执行器（网络错误 + 5xx + 429 重试，4xx 与配置错误不重试）
-//! - 非流式 `chat` 接入精确缓存：命中直接复用、写失败静默降级；流式不缓存
-//! - `chat_with_images`: 图片理解的带图非流式调用（与非流式 `chat` 同一发送路径，不接缓存）
+//! - 非流式 `chat_with_usage` 接入精确缓存：命中直接复用、写失败静默降级；流式不缓存
+//! - `chat` 复用同一条发送路径并丢弃用量；用量随本次调用返回，不做跨调用共享
+//! - `chat_with_images`: 图片理解的带图非流式调用（与非流式同一发送路径，不接缓存）
 //! - `resolve_constructor_key`: 构造期 keychain 读取降级（失败不阻断 provider 构造）
 
 use futures::Stream;
 use ramaria_core::error::{RamariaError, RamariaResult};
-use ramaria_core::traits::{ChatRequest, LlmResponseCache, StreamDelta};
+use ramaria_core::traits::{ChatRequest, LlmResponseCache, LlmUsage, StreamDelta};
 use ramaria_core::types::{BackendConfig, ModelCapability};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -47,7 +48,7 @@ pub(crate) struct ProviderBase {
     transport: Arc<OpenAiTransport>,
     /// 重试配置
     retry_config: RetryConfig,
-    /// LLM 响应精确缓存（v1.5 新增；None = 未启用缓存，行为同 v1.4）
+    /// LLM 响应精确缓存（None = 未启用缓存）
     cache: Option<Arc<dyn LlmResponseCache>>,
 }
 
@@ -160,13 +161,14 @@ impl ProviderBase {
     // 非流式聊天
     // =========================================================
 
-    /// 执行非流式聊天（带重试 + 可选精确缓存）。
+    /// 执行非流式聊天（带重试 + 可选精确缓存 + 单次调用用量）。
     ///
     /// 参数:
     /// - `request`: 组装好的聊天请求。
     ///
     /// 返回:
-    /// - 完整 assistant 回复文本。
+    /// - `(text, Some(usage))`: 本次调用真的发到了模型且响应带用量；
+    /// - `(text, None)`: 命中产品响应缓存（未请求模型）或响应没有 `usage` 段。
     ///
     /// 缓存行为（三层生成缓存）:
     /// - 已注入缓存（`with_cache`）且 `request.template_version` 非空时：
@@ -177,8 +179,13 @@ impl ProviderBase {
     /// - 未注入缓存或 template_version 为空：行为与 v1.4 完全一致。
     ///
     /// 说明:
+    /// - 用例只关心文本时用 `chat`，它复用本函数并丢弃用量；
+    /// - 重试只保留最终成功那次的用量，失败尝试不累加；
     /// - 流式 `chat_stream` 不缓存（交互式场景无重跑语义）。
-    pub async fn chat(&self, request: &ChatRequest) -> RamariaResult<String> {
+    pub async fn chat_with_usage(
+        &self,
+        request: &ChatRequest,
+    ) -> RamariaResult<(String, Option<LlmUsage>)> {
         let messages = build_messages(request);
         let model = &self.config.capability.model_id;
         // 优先使用 ChatRequest 显式参数（允许不同调用路径使用不同的
@@ -208,7 +215,8 @@ impl ProviderBase {
                         cache_hit = true,
                         "LLM 精确缓存命中，直接复用响应"
                     );
-                    return Ok(cached);
+                    // 缓存命中没有真实调用，本次用量为空（不是上一次调用的数值）。
+                    return Ok((cached, None));
                 }
                 Ok(None) => {
                     tracing::debug!(
@@ -230,21 +238,20 @@ impl ProviderBase {
 
             let response = self
                 .with_retry(|| async {
-                    self.transport
-                        .chat(
-                            &messages,
-                            model,
-                            temperature,
-                            max_tokens,
-                            request.enable_thinking,
-                        )
-                        .await
+                    self.send_chat(
+                        &messages,
+                        model,
+                        temperature,
+                        max_tokens,
+                        request.enable_thinking,
+                    )
+                    .await
                 })
                 .await;
 
             // ---- 成功后写入缓存（写失败不阻断，记 warn 继续）----
             match &response {
-                Ok(text) => {
+                Ok((text, _usage)) => {
                     if let Err(e) = cache
                         .put(&key, text, model, &request.template_version)
                         .await
@@ -268,19 +275,25 @@ impl ProviderBase {
             return response;
         }
 
-        // ---- 未启用缓存路径（与 v1.4 行为一致）----
+        // ---- 未启用缓存路径：直接走 LLM ----
         self.with_retry(|| async {
-            self.transport
-                .chat(
-                    &messages,
-                    model,
-                    temperature,
-                    max_tokens,
-                    request.enable_thinking,
-                )
-                .await
+            self.send_chat(
+                &messages,
+                model,
+                temperature,
+                max_tokens,
+                request.enable_thinking,
+            )
+            .await
         })
         .await
+    }
+
+    /// 执行非流式聊天，只返回文本。
+    ///
+    /// 说明: 与 `chat_with_usage` 同一条发送路径；不需要用量时用本入口。
+    pub async fn chat(&self, request: &ChatRequest) -> RamariaResult<String> {
+        Ok(self.chat_with_usage(request).await?.0)
     }
 
     // =========================================================
@@ -310,17 +323,43 @@ impl ProviderBase {
         let max_tokens = request.max_tokens;
 
         self.with_retry(|| async {
-            self.transport
-                .chat(
-                    &messages,
-                    model,
-                    temperature,
-                    max_tokens,
-                    request.enable_thinking,
-                )
-                .await
+            self.send_chat(
+                &messages,
+                model,
+                temperature,
+                max_tokens,
+                request.enable_thinking,
+            )
+            .await
         })
         .await
+        .map(|(text, _usage)| text)
+    }
+
+    // =========================================================
+    // 非流式发送
+    // =========================================================
+
+    /// 发送一次非流式请求，返回文本与本次调用的用量。
+    ///
+    /// 参数:
+    /// - `messages`: 已组装好的 OpenAI 消息数组；
+    /// - `model` / `temperature` / `max_tokens` / `enable_thinking`: 采样与思考参数。
+    ///
+    /// 返回:
+    /// - 成功时返回 assistant 完整文本与本次调用的用量；
+    /// - 失败时透传传输层错误。
+    async fn send_chat(
+        &self,
+        messages: &[serde_json::Value],
+        model: &str,
+        temperature: f64,
+        max_tokens: u32,
+        enable_thinking: Option<bool>,
+    ) -> RamariaResult<(String, Option<LlmUsage>)> {
+        self.transport
+            .chat(messages, model, temperature, max_tokens, enable_thinking)
+            .await
     }
 
     // =========================================================

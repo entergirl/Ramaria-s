@@ -13,7 +13,7 @@ use futures::Stream;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use ramaria_core::error::RamariaResult;
-use ramaria_core::traits::{ChatRequest, StorageBackend, StreamDelta};
+use ramaria_core::traits::{ChatRequest, LlmUsage, StorageBackend, StreamDelta};
 use ramaria_core::types::{Message, MessageRole, MessageSource, now_ms};
 use uuid::Uuid;
 
@@ -26,16 +26,20 @@ use super::EMPTY_REPLY_MESSAGE;
 // 生成侧（非流式 / 流式）
 // =========================================================
 
-/// 非流式生成：调用 LLM 并返回回复全文；失败记 warn 并上抛（不落库）。
+/// 非流式生成：调用 LLM 并返回回复全文与本次调用的用量；失败记 warn 并上抛（不落库）。
+///
+/// 返回:
+/// - `(reply, Some(usage))`: 本次调用真的发到了模型且 provider 返回了用量；
+/// - `(reply, None)`: provider 未上报用量或命中产品响应缓存。
 pub(super) async fn step_call_llm(
     engine: &Engine,
     request: &ChatRequest,
     session_id: Uuid,
-) -> RamariaResult<String> {
+) -> RamariaResult<(String, Option<LlmUsage>)> {
     // LLM provider 取快照后在锁外调用（热更新期间取到旧快照或新快照均自洽）
     let llm = engine.llm_ref();
-    match llm.chat(request).await {
-        Ok(reply) => Ok(reply),
+    match llm.chat_with_usage(request).await {
+        Ok(result) => Ok(result),
         Err(e) => {
             tracing::warn!(
                 session_id = %session_id,

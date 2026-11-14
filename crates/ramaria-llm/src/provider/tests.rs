@@ -5,6 +5,7 @@
 //! - 覆盖 build_messages 组装、Prompt Injection 检测与 XML 分隔
 //! - 覆盖 ProviderBase 构造 / 能力查询 / keychain 读取降级
 //! - 覆盖精确缓存的命中 / 未命中 / 查询失败降级 / 空模板版本跳过
+//! - 覆盖单次调用用量随返回值流动（缓存命中为空，未命中取响应 usage 段）
 
 use super::*;
 use ramaria_core::error::{RamariaError, RamariaResult};
@@ -600,6 +601,95 @@ fn chat_request(template_version: &str) -> ChatRequest {
         template_version: template_version.into(),
         enable_thinking: None,
     }
+}
+
+// ---- 单次调用用量 ----
+
+/// 缓存命中：直接返回缓存文本，本次用量为空（没有请求模型）。
+#[tokio::test]
+async fn chat_with_usage_cache_hit_returns_no_usage() {
+    let cache = MockCache::new();
+    let request = chat_request("test");
+    let messages = build_messages(&request);
+    let key = cache_key(
+        "test-model",
+        "test",
+        0.3,
+        1024,
+        request.enable_thinking,
+        &messages,
+    );
+    cache
+        .store
+        .lock()
+        .unwrap()
+        .insert(key, "cached-reply".to_string());
+
+    let base = base_with_no_llm().with_cache(Arc::new(cache.clone()));
+    let (reply, usage) = base
+        .chat_with_usage(&request)
+        .await
+        .expect("命中缓存应直接返回");
+    assert_eq!(reply, "cached-reply");
+    assert!(usage.is_none(), "缓存命中没有模型调用，用量应为空");
+}
+
+/// 未命中：文本与用量由同一次调用返回，四个计数取自响应 usage 段。
+#[tokio::test]
+async fn chat_with_usage_returns_parsed_usage() {
+    let body = r#"{"choices":[{"message":{"content":"你好"}}],"usage":{"prompt_tokens":1200,"completion_tokens":90,"prompt_cache_hit_tokens":1024,"prompt_cache_miss_tokens":176}}"#;
+    let base_url = spawn_mock_chat_server(body).await;
+    let mut config = BackendConfig::lm_studio_default();
+    config.base_url = base_url;
+    config.capability.model_id = "test-model".to_string();
+    let base = ProviderBase::with_retry_config(
+        config,
+        None,
+        5,
+        RetryConfig {
+            max_retries: 0,
+            ..Default::default()
+        },
+    )
+    .expect("构造应成功");
+
+    let (reply, usage) = base
+        .chat_with_usage(&chat_request("test"))
+        .await
+        .expect("mock 服务应返回成功");
+    assert_eq!(reply, "你好");
+    let usage = usage.expect("响应带 usage 段应解析出用量");
+    assert_eq!(usage.prompt_tokens, 1200);
+    assert_eq!(usage.completion_tokens, 90);
+    assert_eq!(usage.cache_hit_tokens, 1024);
+    assert_eq!(usage.cache_miss_tokens, 176);
+    assert_eq!(usage.cache_hit_rate(), Some(1024.0 / 1200.0));
+}
+
+/// 启动一次性 mock 非流式服务：对任意 POST 返回固定 JSON 体。
+///
+/// 返回 base_url（带 `/v1`），供 ProviderBase 指向该地址；只服务单次调用。
+async fn spawn_mock_chat_server(body: &'static str) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("绑定 mock 端口应成功");
+    let addr = listener.local_addr().expect("获取 mock 地址应成功");
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut socket, _) = listener.accept().await.expect("mock 应收到连接");
+        let mut buf = [0u8; 2048];
+        let _ = socket.read(&mut buf).await.expect("mock 读请求应成功");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("mock 写响应应成功");
+    });
+    format!("http://{addr}/v1")
 }
 
 #[test]

@@ -474,6 +474,27 @@ async fn attach_sqlite_pool_roundtrip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 评测判分 provider 出口：按入参构造独立 provider，且不替换引擎快照。
+#[tokio::test]
+async fn eval_llm_builds_provider_without_touching_engine() {
+    let dir = temp_dir("eval-llm");
+    let db_path = dir.join("ramaria.db");
+    let engine = Engine::open(db_path).await.expect("引擎装配应成功");
+    let before = engine.llm().name();
+
+    let provider = engine
+        .eval_llm(&BackendConfig::lm_studio_default())
+        .expect("本地配置应可构造评测 provider");
+    assert_eq!(provider.name(), "LM Studio");
+    assert_eq!(
+        engine.llm().name(),
+        before,
+        "评测出口不得替换引擎快照里的 provider"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // =========================================================
 // 数据库快照
 // =========================================================

@@ -6,6 +6,7 @@
 //! - 健康探测按剩余失败次数返回错误，覆盖后端启动重试
 //! - 图片理解记录收到的 data URI 序列与调用次数，回复可覆写
 //! - 调用序列（chat / chat_vision）可查询，不发起任何网络请求
+//! - 用量 mock 随每次调用返回 token 数值，供上层断言累加与命中率
 
 use std::collections::VecDeque;
 use std::pin::Pin;
@@ -15,7 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use futures::{Stream, stream};
 use ramaria_core::error::{RamariaError, RamariaResult};
-use ramaria_core::traits::{ChatRequest, LlmProvider, StreamDelta};
+use ramaria_core::traits::{ChatRequest, LlmProvider, LlmUsage, StreamDelta};
 use ramaria_core::types::{BackendConfig, ModelCapability};
 
 // =========================================================
@@ -438,6 +439,84 @@ impl LlmProvider for MockLlmProvider {
 
     fn name(&self) -> &'static str {
         self.inner.name()
+    }
+}
+
+// =========================================================
+// MockUsageLlm
+// =========================================================
+
+/// 固定上报 token 用量的 LLM mock。
+///
+/// 职责:
+/// - 每次调用返回同一段回复，并随返回值上报同一份用量；
+/// - 供上层断言用量累加、调用计数与缓存命中率，不发起网络请求。
+///
+/// 字段约定:
+/// - `reply`: 固定回复文本；
+/// - `usage`: 每次调用上报的用量；
+/// - `calls`: 已发生的 `chat` 调用次数。
+pub struct MockUsageLlm {
+    reply: String,
+    usage: LlmUsage,
+    backend: BackendConfig,
+    calls: AtomicUsize,
+}
+
+impl MockUsageLlm {
+    /// 用固定回复与固定用量构造。
+    pub fn new(reply: &str, usage: LlmUsage) -> Self {
+        Self {
+            reply: reply.to_string(),
+            usage,
+            backend: BackendConfig::lm_studio_default(),
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    /// 已发生的 `chat` 调用次数。
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::Acquire)
+    }
+}
+
+#[async_trait]
+impl LlmProvider for MockUsageLlm {
+    async fn chat(&self, request: &ChatRequest) -> RamariaResult<String> {
+        Ok(self.chat_with_usage(request).await?.0)
+    }
+
+    async fn chat_with_usage(
+        &self,
+        _request: &ChatRequest,
+    ) -> RamariaResult<(String, Option<LlmUsage>)> {
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        Ok((self.reply.clone(), Some(self.usage)))
+    }
+
+    async fn chat_stream(
+        &self,
+        _request: &ChatRequest,
+    ) -> RamariaResult<Pin<Box<dyn Stream<Item = RamariaResult<StreamDelta>> + Send>>> {
+        Err(RamariaError::unsupported(
+            "MockUsageLlm 不提供流式调用（用量 mock 只服务非流式断言）",
+        ))
+    }
+
+    fn capability(&self) -> &ModelCapability {
+        &self.backend.capability
+    }
+
+    fn config(&self) -> &BackendConfig {
+        &self.backend
+    }
+
+    async fn validate(&self) -> RamariaResult<()> {
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        "MockUsageLlm"
     }
 }
 

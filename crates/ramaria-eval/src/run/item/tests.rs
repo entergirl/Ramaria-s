@@ -135,6 +135,7 @@ fn outcome() -> ramaria_service::EvalChatOutcome {
         session_id: Uuid::new_v4(),
         chars: 2,
         recall: ramaria_service::EvalRecallObservation::default(),
+        usage: None,
     }
 }
 
@@ -152,6 +153,7 @@ fn success_record_keeps_all_fields() {
         123,
         1,
         "answer-model",
+        None,
         line(),
     );
 
@@ -168,10 +170,14 @@ fn success_record_keeps_all_fields() {
     assert_eq!(record.question, "问题");
     assert_eq!(record.gold_answer, "答案");
     assert_eq!(record.gold_message_ids, vec!["m1", "m2"]);
+    assert_eq!(record.evidence, vec!["chat1"]);
+    assert_eq!(record.question_type, vec!["Single_hop"]);
+    assert_eq!(record.score_points.len(), 1);
     assert_eq!(record.category, vec![0, 2]);
     assert_eq!(record.reply.as_deref(), Some("回复"));
     assert_eq!(record.reply_chars, 2);
     assert!(record.recall.is_some());
+    assert!(record.usage.is_none(), "生成结果未带用量时为空");
     assert_eq!(record.elapsed_ms, 123);
     assert!(record.error.is_none());
     assert_eq!(record.attempts, 1);
@@ -207,6 +213,142 @@ fn success_record_keeps_all_fields() {
     assert_eq!(parsed, record);
 }
 
+/// 用量照抄生成结果；失败行恒为 None（旧产物缺该键亦按 None 解析）。
+#[test]
+fn usage_follows_outcome_and_failure_has_none() {
+    let mut source = outcome();
+    source.usage = Some(LlmUsage {
+        prompt_tokens: 1200,
+        completion_tokens: 90,
+        cache_hit_tokens: 1024,
+        cache_miss_tokens: 176,
+    });
+    let record = RunItemRecord::success(
+        &item(),
+        &condition(),
+        source,
+        10,
+        1,
+        "answer-model",
+        None,
+        line(),
+    );
+    let usage = record.usage.expect("成功行应带用量");
+    assert_eq!(usage.prompt_tokens, 1200);
+    assert_eq!(usage.cache_hit_tokens, 1024);
+    assert_eq!(usage.cache_miss_tokens, 176);
+
+    let failed = RunItemRecord::failure(
+        &item(),
+        &condition(),
+        "模型不可达",
+        10,
+        0,
+        "answer-model",
+        None,
+        line(),
+    );
+    assert!(failed.usage.is_none(), "失败行不写用量");
+}
+
+/// 预置管线记录实际注入字数（空串为 0），检索管线写 null 且往返一致。
+#[test]
+fn preset_chars_record_injected_preset_length() {
+    let success = RunItemRecord::success(
+        &item(),
+        &condition(),
+        outcome(),
+        10,
+        1,
+        "answer-model",
+        Some("预置摘要".chars().count()),
+        line(),
+    );
+    let value = serde_json::to_value(&success).expect("应可序列化");
+    assert_eq!(value["preset_chars"], 4, "应按字符数而非字节数记录");
+    let parsed: RunItemRecord = serde_json::from_value(value).expect("应可反序列化");
+    assert_eq!(parsed.preset_chars, Some(4));
+
+    let empty_preset = RunItemRecord::failure(
+        &item(),
+        &condition(),
+        "超时",
+        10,
+        1,
+        "answer-model",
+        Some(0),
+        line(),
+    );
+    let value = serde_json::to_value(&empty_preset).expect("应可序列化");
+    assert_eq!(value["preset_chars"], 0, "空预置上下文应按 0 记录");
+
+    let retrieval = RunItemRecord::success(
+        &item(),
+        &condition(),
+        outcome(),
+        10,
+        1,
+        "answer-model",
+        None,
+        line(),
+    );
+    let value = serde_json::to_value(&retrieval).expect("应可序列化");
+    assert!(value["preset_chars"].is_null(), "检索管线应写 null");
+    assert_eq!(retrieval.preset_chars, None);
+}
+
+/// 旧产物行缺 `preset_chars` 时按无预置上下文解析。
+#[test]
+fn legacy_line_without_preset_chars_parses_as_none() {
+    let record = RunItemRecord::success(
+        &item(),
+        &condition(),
+        outcome(),
+        10,
+        1,
+        "answer-model",
+        None,
+        line(),
+    );
+    let mut value = serde_json::to_value(&record).expect("应可序列化");
+    value
+        .as_object_mut()
+        .expect("逐题产物应为对象")
+        .remove("preset_chars");
+
+    let parsed: RunItemRecord = serde_json::from_value(value).expect("旧行应可解析");
+    assert!(parsed.preset_chars.is_none(), "缺失预设字数按无记录解析");
+}
+
+/// 旧产物行缺三个判分原料键时按空解析，不拒绝旧 run。
+#[test]
+fn legacy_line_without_scoring_materials_parses_as_empty() {
+    let record = RunItemRecord::success(
+        &item(),
+        &condition(),
+        outcome(),
+        10,
+        1,
+        "answer-model",
+        None,
+        line(),
+    );
+    let mut value = serde_json::to_value(&record).expect("应可序列化");
+    let object = value.as_object_mut().expect("逐题产物应为对象");
+    for key in ["evidence", "question_type", "score_points"] {
+        object.remove(key);
+    }
+
+    let parsed: RunItemRecord = serde_json::from_value(value).expect("旧行应可解析");
+    assert!(parsed.evidence.is_empty(), "缺失证据引用按空解析");
+    assert!(parsed.question_type.is_empty(), "缺失题目类型按空解析");
+    assert!(parsed.score_points.is_empty(), "缺失分项要点按空解析");
+    assert_eq!(
+        parsed.question_id, record.question_id,
+        "解析失败不应影响其余字段"
+    );
+}
+
 /// 失败行 `reply` / `recall` 为 null、`error` 为字符串。
 #[test]
 fn failure_record_nulls_result_fields() {
@@ -217,6 +359,7 @@ fn failure_record_nulls_result_fields() {
         45,
         3,
         "answer-model",
+        None,
         line(),
     );
 
@@ -283,10 +426,19 @@ fn append_writes_one_line_per_record() {
         10,
         1,
         "answer-model",
+        None,
         line(),
     );
-    let failure =
-        RunItemRecord::failure(&item(), &condition(), "超时", 20, 2, "answer-model", line());
+    let failure = RunItemRecord::failure(
+        &item(),
+        &condition(),
+        "超时",
+        20,
+        2,
+        "answer-model",
+        None,
+        line(),
+    );
     append(&path, &success).expect("首次追加应成功");
     append(&path, &failure).expect("二次追加应成功");
 

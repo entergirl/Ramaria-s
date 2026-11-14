@@ -126,8 +126,8 @@ pub use lifecycle::{Lifecycle, LifecycleOptions};
 pub use model::{
     BackendConfigWriteOptions, BackendConfigWriteOutcome, ModelDownloadProgress, ModelDownloadSink,
     ModelDownloadStatus, RemoveModelOutcome, download_model, download_model_with_progress,
-    is_model_ready, list_models, model_size, models_root, read_backend_config_at, remove_model,
-    validate_embedding_model,
+    eval_llm, eval_llm_with_key, is_model_ready, list_models, model_size, models_root,
+    read_backend_config_at, remove_model, validate_embedding_model,
 };
 pub use persona::{PersonaLoadMode, PersonaRegenerateOutcome};
 // 预设类型 re-export：入口层（桌面）消费预览结构时经服务层取用，不新增直连 memory crate 的依赖

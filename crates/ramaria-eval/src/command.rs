@@ -42,17 +42,32 @@ pub enum EvalCommand {
         language: Option<String>,
         /// 产物输出路径
         output: Option<PathBuf>,
+        /// 只回填 artifact 映射（必须显式给档位）
+        artifacts: bool,
     },
     /// 对已有运行结果判分
     Score {
-        /// 运行 id
+        /// 运行 id（也可以是运行根目录路径）
         run_id: String,
+        /// 跳过 judge 判分，只产出确定性指标
+        no_judge: bool,
     },
     /// 生成运行报告
     Report {
-        /// 运行 id
+        /// 运行 id（也可以是运行根目录路径）
         run_id: String,
-        /// 报告输出路径
+        /// 压缩层 oracle 的运行 id（缺省尝试运行根下的 oracle）
+        oracle: Option<String>,
+        /// 额外对照运行（可重复）
+        compare: Vec<String>,
+        /// 报告输出目录（缺省为运行根下 report）
+        output: Option<PathBuf>,
+    },
+    /// 以预置上下文跑压缩层 oracle
+    Oracle {
+        /// 被引用的运行 id（也可以是运行根目录路径）
+        run_id: String,
+        /// 产物输出路径（缺省为被引用运行根下的 oracle）
         output: Option<PathBuf>,
     },
 }
@@ -66,6 +81,7 @@ impl EvalCommand {
             Self::Baseline { .. } => "baseline",
             Self::Score { .. } => "score",
             Self::Report { .. } => "report",
+            Self::Oracle { .. } => "oracle",
         }
     }
 }
@@ -79,8 +95,10 @@ impl EvalCommand {
 /// 返回:
 /// - 无参：TTY 下进入沙盒界面，非 TTY 读取标准输入并运行沙盒（报告写标准输出）；
 /// - `corpus verify`：校验通过时报告写标准输出，失败返回结构化错误；
-/// - `baseline`：逐档建库并导出产物，摘要写标准输出；
+/// - `baseline`：逐档建库并导出产物，摘要写标准输出；带 `artifacts` 时只回填 artifact 映射；
 /// - `run`：按矩阵批量运行，摘要写标准输出（已存在运行根则续跑）；
+/// - `score`：对已有运行结果判分，产物写运行根下 `score/`，摘要写标准输出；
+/// - `oracle`：以预置上下文复用被引用运行的矩阵跑一遍，摘要写标准输出；
 /// - 其余子命令：`Unsupported`（尚未实现）。
 pub async fn run(command: Option<EvalCommand>, context: EvalContext) -> RamariaResult<()> {
     match command {
@@ -93,6 +111,18 @@ pub async fn run(command: Option<EvalCommand>, context: EvalContext) -> RamariaR
             tier,
             language,
             output,
+            artifacts: true,
+        }) => {
+            let report = crate::baseline::backfill(corpus, tier, language, output).await?;
+            println!("{}", report.render());
+            Ok(())
+        }
+        Some(EvalCommand::Baseline {
+            corpus,
+            tier,
+            language,
+            output,
+            artifacts: false,
         }) => {
             let report = crate::baseline::run(corpus, tier, language, output).await?;
             println!("{}", report.render());
@@ -107,10 +137,43 @@ pub async fn run(command: Option<EvalCommand>, context: EvalContext) -> RamariaR
             println!("{}", report.render());
             Ok(())
         }
-        Some(command) => Err(RamariaError::unsupported(format!(
-            "eval {} 尚未实现",
-            command.name()
-        ))),
+        Some(EvalCommand::Score { run_id, no_judge }) => {
+            let cwd = std::env::current_dir()
+                .map_err(|error| RamariaError::io("读取当前工作目录失败", Some(error)))?;
+            let root = crate::score::resolve_run_root(&cwd, &run_id);
+            let (report, usage) =
+                crate::score::run(&root, crate::score::ScoreOptions { no_judge }).await?;
+            println!(
+                "{}",
+                report.render(&crate::score::ScoreReport::dir_of(&root), &usage.total)
+            );
+            Ok(())
+        }
+        Some(EvalCommand::Report {
+            run_id,
+            oracle,
+            compare,
+            output,
+        }) => {
+            let cwd = std::env::current_dir()
+                .map_err(|error| RamariaError::io("读取当前工作目录失败", Some(error)))?;
+            let outcome = crate::report::run(
+                &cwd,
+                &crate::report::ReportOptions {
+                    run_id,
+                    oracle,
+                    compare,
+                    output,
+                },
+            )?;
+            print!("{}", outcome.render());
+            Ok(())
+        }
+        Some(EvalCommand::Oracle { run_id, output }) => {
+            let report = crate::oracle::run(&run_id, output).await?;
+            println!("{}", report.render());
+            Ok(())
+        }
     }
 }
 
@@ -118,24 +181,28 @@ pub async fn run(command: Option<EvalCommand>, context: EvalContext) -> RamariaR
 mod tests {
     use super::*;
 
-    /// 未实现的子命令返回 unsupported，文案带子命令名。
+    /// 报告子命令对不存在的运行在读取产物前失败。
     #[tokio::test]
-    async fn run_with_command_reports_unsupported() {
+    async fn report_rejects_unknown_run() {
+        let missing = std::env::temp_dir().join("ramaria-eval-report-missing-run");
         let err = run(
-            Some(EvalCommand::Score {
-                run_id: "run-1".into(),
+            Some(EvalCommand::Report {
+                run_id: missing.to_string_lossy().to_string(),
+                oracle: None,
+                compare: Vec::new(),
+                output: None,
             }),
             EvalContext::default(),
         )
         .await
-        .expect_err("子命令应返回 unsupported");
+        .expect_err("未知运行应报错");
         assert!(
-            matches!(&err, RamariaError::Unsupported { .. }),
-            "应为 unsupported，实际 {err:?}"
+            matches!(&err, RamariaError::Validation { .. }),
+            "应为 Validation，实际 {err:?}"
         );
         assert!(
-            err.to_string().contains("score"),
-            "文案应含子命令名，实际 {err}"
+            err.to_string().contains("运行目录不存在"),
+            "文案应提示运行目录不存在，实际 {err}"
         );
     }
 
@@ -208,16 +275,32 @@ mod tests {
                     tier: None,
                     language: None,
                     output: None,
+                    artifacts: false,
                 },
                 "baseline",
             ),
-            (EvalCommand::Score { run_id: "r".into() }, "score"),
+            (
+                EvalCommand::Score {
+                    run_id: "r".into(),
+                    no_judge: false,
+                },
+                "score",
+            ),
             (
                 EvalCommand::Report {
                     run_id: "r".into(),
+                    oracle: None,
+                    compare: Vec::new(),
                     output: None,
                 },
                 "report",
+            ),
+            (
+                EvalCommand::Oracle {
+                    run_id: "r".into(),
+                    output: None,
+                },
+                "oracle",
             ),
         ];
         for (command, expected) in cases {

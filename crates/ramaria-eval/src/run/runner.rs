@@ -2,11 +2,12 @@
 //!
 //! 设计特点:
 //! - 条件 → 题目两层循环：条件只跑本题集档位，题目按枚举顺序推进
-//! - 单题失败不中断：重试到上限后写失败行并继续下一题
+//! - 失败不中断：单题重试到上限后写失败行继续；条件级失败写告警并把未完成题记为失败
 //! - 断点续跑：已完成题跳过，失败题按末行尝试次数判断是否超限
-//! - 条件级失败（装配 / 索引）写告警，并把该条件未完成题目记为失败
+//! - 分层抽样只过滤题集：报告落 sample.json，续跑复用同一批题号
 //! - 状态按批落盘、逐题产物逐行追加，中断后两者都能就地恢复
-//! - 日志只记题目标识 / 条件 / 耗时 / 错误分类，不记问题与回复正文
+//! - 云端答题模型可用进程内密钥覆盖（评测专用密钥），只在内存生效，不落库
+//! - 日志只记题目标识 / 条件 / 耗时 / 错误分类，不记问题与回复正文与密钥内容
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -15,16 +16,16 @@ use std::time::Instant;
 
 use chrono::Utc;
 use ramaria_core::error::{RamariaError, RamariaResult};
-use ramaria_service::{ChatSendRequest, Engine, EvalChatOptions};
+use ramaria_service::Engine;
 use sha2::{Digest, Sha256};
 
 use crate::baseline::MANIFEST_FILE;
-use crate::corpus;
 use crate::measure::elapsed_ms;
 
-use super::context::build_full_context;
 use super::item::{self, ConditionLine, RunItemRecord};
 use super::matrix::{Condition, Pipeline, RunMatrix};
+use super::oracle_context::OracleCache;
+use super::pipeline::{ConditionRun, ItemSink, run_condition};
 use super::plan::{BaselineTier, RunItem, plan_items};
 use super::state::{self, RunState, RunStatus, RunTierRef};
 use super::workspace::{ITEMS_FILE, RunWorkspace};
@@ -43,12 +44,6 @@ const RUNS_RELATIVE: &str = ".eval/runs";
 
 /// 默认运行标识前缀。
 const RUN_ID_PREFIX: &str = "run-";
-
-/// 评测问答使用的通道标识。
-const EVAL_CHANNEL: &str = "eval";
-
-/// 状态落盘间隔（按题数）。
-const SAVE_EVERY: usize = 10;
 
 // =========================================================
 // 报告
@@ -126,13 +121,31 @@ pub async fn run(
         return Err(RamariaError::validation(matrix_missing(&matrix_path)));
     }
     let matrix = RunMatrix::load(&matrix_path)?;
+    let tiers = load_tiers(&cwd, &matrix, corpus.as_deref())?;
+    let root = run_root(&cwd, output);
+    execute(matrix, root, tiers).await
+}
 
-    // ---- 基线根与档位 ----
-    let corpus_name = corpus.as_deref().unwrap_or(matrix.run.corpus.as_str());
-    let spec = corpus::find(corpus_name).ok_or_else(|| {
+/// 读取矩阵引用的全部基线档位。
+///
+/// 参数:
+/// - `cwd`: 当前工作目录（基线根相对它解析）；
+/// - `matrix`: 已校验的矩阵；
+/// - `corpus`: 语料名覆盖值，`None` 取矩阵声明值。
+///
+/// 返回:
+/// - 按 `run.tiers` 顺序加载的档位；
+/// - 未知语料或档位产物不完整返回结构化错误。
+pub(crate) fn load_tiers(
+    cwd: &Path,
+    matrix: &RunMatrix,
+    corpus: Option<&str>,
+) -> RamariaResult<Vec<BaselineTier>> {
+    let corpus_name = corpus.unwrap_or(matrix.run.corpus.as_str());
+    let spec = crate::corpus::find(corpus_name).ok_or_else(|| {
         RamariaError::validation(format!(
             "未知语料: {corpus_name}（已登记: {}）",
-            corpus::lifebench().name
+            crate::corpus::lifebench().name
         ))
     })?;
     let baseline_root = cwd.join(BASELINES_RELATIVE).join(format!(
@@ -143,16 +156,51 @@ pub async fn run(
     for tier_id in &matrix.run.tiers {
         tiers.push(BaselineTier::load(&baseline_root.join(tier_id))?);
     }
+    Ok(tiers)
+}
+
+/// 按矩阵与档位执行条件循环。
+///
+/// 参数:
+/// - `matrix`: 本次冻结的矩阵（含管线与预算轴）；
+/// - `root`: 运行根目录（已存在则续跑）；
+/// - `tiers`: 已加载的档位，顺序即题目顺序。
+///
+/// 返回:
+/// - 成功时返回运行摘要；
+/// - 状态不一致 / 写入失败返回结构化错误；条件级失败写告警并继续。
+///
+/// 说明:
+/// - 只驱动生成与落盘，路径解析留给调用方，使 oracle 子命令可复用同一循环；
+/// - 矩阵声明抽样预算时先过滤题集，抽样报告在状态校验通过后落盘。
+pub(crate) async fn execute(
+    matrix: RunMatrix,
+    root: PathBuf,
+    tiers: Vec<BaselineTier>,
+) -> RamariaResult<RunReport> {
+    // ---- 运行根与抽样 ----
+    let workspace = RunWorkspace::new(&root)?;
+    // 档位引用描述基线产物本身，题数取抽样前的全量。
+    let tier_refs = tier_refs(&tiers)?;
+    let mut tiers = tiers;
+    let sampled = super::sample::apply(&matrix, &root, &mut tiers)?;
 
     // ---- 题集与条件 ----
     let items = plan_items(&tiers, matrix.run.question_limit);
     let conditions = matrix.conditions();
     let condition_totals = condition_totals(&conditions, &items);
+    // 评测专用密钥只读一次：为空表示沿用系统 keychain 口径，行为与默认一致。
+    let eval_key = crate::eval_api_key();
+    tracing::info!(has_eval_key = eval_key.is_some(), "评测答题模型密钥来源");
 
-    // ---- 运行根与状态 ----
-    let root = run_root(&cwd, output);
-    let workspace = RunWorkspace::new(&root)?;
-    let mut state = RunState::load_or_init(&root, &matrix, &tier_refs(&tiers)?, &condition_totals)?;
+    // ---- 运行状态 ----
+    let mut state = RunState::load_or_init(&root, &matrix, &tier_refs, &condition_totals)?;
+    if let Some(report) = &sampled.report {
+        super::sample::write(&root, report)?;
+    }
+    for line in &sampled.lines {
+        eprintln!("{line}");
+    }
 
     let items_path = root.join(ITEMS_FILE);
     let keys = state::scan_items(&items_path)?;
@@ -166,6 +214,7 @@ pub async fn run(
 
     // ---- 条件循环 ----
     let started = Instant::now();
+    let mut oracle = OracleCache::default();
     for condition in &conditions {
         let Some(tier) = tiers
             .iter()
@@ -216,99 +265,92 @@ pub async fn run(
                 continue;
             }
         };
+        if let Some(key) = eval_key.as_deref() {
+            apply_eval_key(&engine, &condition.id, key);
+        }
         tracing::info!(
             condition = %condition.id,
             backend = %backend.model_text(),
             "评测条件开始"
         );
 
-        let index_status = match engine.rebuild_index().await {
-            Ok(_) => {
-                let view = engine.index_status();
-                let status = view.status.as_str().to_string();
-                if status != "ready" && view.loaded != view.total {
-                    state.warnings.push(format!(
-                        "条件 {} 索引未就绪: {}（{}/{}）",
-                        condition.id, status, view.loaded, view.total
-                    ));
+        // 预置上下文条件不经过召回：不重建索引，省去一次全库构建，也不让嵌入缺失拖垮条件。
+        let index_status = if condition.pipeline == Pipeline::OracleL1 {
+            engine.index_status().status.as_str().to_string()
+        } else {
+            match engine.rebuild_index().await {
+                Ok(_) => {
+                    let view = engine.index_status();
+                    let status = view.status.as_str().to_string();
+                    if status != "ready" && view.loaded != view.total {
+                        state.warnings.push(format!(
+                            "条件 {} 索引未就绪: {}（{}/{}）",
+                            condition.id, status, view.loaded, view.total
+                        ));
+                    }
+                    status
                 }
-                status
-            }
-            Err(error) => {
-                let reason = format!("索引重建失败: {error}");
-                tracing::warn!(condition = %condition.id, error = %error, "评测索引重建失败");
-                state.warnings.push(format!("{}：{reason}", condition.id));
-                let line = ConditionLine::from_manifest(
-                    &tier.manifest,
-                    &matrix.run.language,
-                    "unavailable",
-                );
-                fail_condition(
-                    &mut state,
-                    &items_path,
-                    condition,
-                    &tier_items,
-                    &line,
-                    &done,
-                    backend.model_text(),
-                    &reason,
-                )?;
-                close_engine(engine).await;
-                state.elapsed_ms = elapsed_ms(started);
-                state.save(&root)?;
-                continue;
+                Err(error) => {
+                    let reason = format!("索引重建失败: {error}");
+                    tracing::warn!(condition = %condition.id, error = %error, "评测索引重建失败");
+                    state.warnings.push(format!("{}：{reason}", condition.id));
+                    let line = ConditionLine::from_manifest(
+                        &tier.manifest,
+                        &matrix.run.language,
+                        "unavailable",
+                    );
+                    fail_condition(
+                        &mut state,
+                        &items_path,
+                        condition,
+                        &tier_items,
+                        &line,
+                        &done,
+                        backend.model_text(),
+                        &reason,
+                    )?;
+                    close_engine(engine).await;
+                    state.elapsed_ms = elapsed_ms(started);
+                    state.save(&root)?;
+                    continue;
+                }
             }
         };
         let line =
             ConditionLine::from_manifest(&tier.manifest, &matrix.run.language, &index_status);
         let effective_model = backend.model_text().to_string();
 
-        let mut processed = 0usize;
-        for item in &tier_items {
-            let key = (condition.id.clone(), item.row.question_id.clone());
-            if should_skip(&done, &attempts, &key, matrix.run.retry_limit) {
-                continue;
-            }
-
-            let outcome = execute_item(
-                &engine,
+        let work_db = workspace.work_db(condition, matrix.run.strict_isolation);
+        // 待跑题目按原顺序编号：并发只改变执行时机，写出仍按这个序号收口。
+        let pending: Vec<&RunItem> = tier_items
+            .iter()
+            .copied()
+            .filter(|item| {
+                let key = (condition.id.clone(), item.row.question_id.clone());
+                !should_skip(&done, &attempts, &key, matrix.run.retry_limit)
+            })
+            .collect();
+        let jobs: Vec<(usize, &RunItem)> = pending.into_iter().enumerate().collect();
+        {
+            let run = ConditionRun {
+                engine: &engine,
                 condition,
-                item,
-                &line,
-                &effective_model,
-                matrix.run.retry_limit,
-            )
-            .await;
-            item::append(&items_path, &outcome.record)?;
-
-            if outcome.success {
-                done.insert(key.clone());
-                attempts.remove(&key);
-                if let Some(entry) = condition_entry(&mut state, &condition.id) {
-                    entry.completed += 1;
-                }
-            } else {
-                attempts.insert(key, outcome.attempts);
-                if let Some(entry) = condition_entry(&mut state, &condition.id) {
-                    entry.failed += 1;
-                }
-            }
-            tracing::info!(
-                question = %outcome.record.question_id,
-                condition = %condition.id,
-                elapsed_ms = outcome.record.elapsed_ms,
-                success = outcome.success,
-                error_kind = outcome.error_kind.unwrap_or("none"),
-                "评测题目完成"
+                line: &line,
+                effective: &effective_model,
+                retry_limit: matrix.run.retry_limit,
+                work_db: &work_db,
+            };
+            let mut sink = ItemSink::new(
+                &items_path,
+                &root,
+                &condition.id,
+                &mut done,
+                &mut attempts,
+                &mut state,
+                started,
             );
-
-            processed += 1;
-            if processed.is_multiple_of(SAVE_EVERY) {
-                state.elapsed_ms = elapsed_ms(started);
-                state.save(&root)?;
-            }
+            run_condition(&run, jobs, &mut oracle, &mut sink).await?;
         }
-
         close_engine(engine).await;
         state.elapsed_ms = elapsed_ms(started);
         state.save(&root)?;
@@ -364,129 +406,38 @@ pub fn should_skip(
         .is_some_and(|attempts| *attempts > retry_limit)
 }
 
-// =========================================================
-// 单题执行
-// =========================================================
-
-/// 单题执行结果。
-struct ItemRun {
-    record: RunItemRecord,
-    success: bool,
-    attempts: u32,
-    error_kind: Option<&'static str>,
-}
-
-impl ItemRun {
-    /// 会话或上下文阶段的失败（尚未进入生成）。
-    fn failed(
-        item: &RunItem,
-        condition: &Condition,
-        error: &RamariaError,
-        effective: &str,
-        line: &ConditionLine,
-    ) -> Self {
-        Self {
-            record: RunItemRecord::failure(
-                item,
-                condition,
-                &error.to_string(),
-                0,
-                0,
-                effective,
-                line.clone(),
-            ),
-            success: false,
-            attempts: 0,
-            error_kind: Some(error_kind(error)),
-        }
+/// 用评测专用密钥重建答题 provider 并热替换（不落库、不写配置文件）。
+///
+/// 参数:
+/// - `engine`: 已按条件装配好的引擎；
+/// - `condition_id`: 条件标识（只用于日志）；
+/// - `key`: 进程内密钥明文，不写日志。
+///
+/// 说明:
+/// - 只对云端模型生效：本地 provider 不需要密钥，传了也不使用；
+/// - 复用引擎当前后端配置（provider / base_url / model），只换密钥来源；
+/// - 构造失败只记 warn 并沿用原 provider，不中断条件。
+fn apply_eval_key(engine: &Engine, condition_id: &str, key: &str) {
+    let current = engine.llm();
+    let config = current.config().clone();
+    if !config.provider.is_online() {
+        tracing::debug!(condition = %condition_id, "本地答题模型，评测密钥不适用");
+        return;
     }
-}
-
-/// 执行一道题：新会话 → 可选全量上下文 → 生成（含重试）。
-async fn execute_item(
-    engine: &Engine,
-    condition: &Condition,
-    item: &RunItem,
-    line: &ConditionLine,
-    effective: &str,
-    retry_limit: u32,
-) -> ItemRun {
-    let started = Instant::now();
-    let session = match engine.create_session(Some(&item.persona_uid)).await {
-        Ok(session) => session,
-        Err(error) => return ItemRun::failed(item, condition, &error, effective, line),
-    };
-
-    let preset_context = if condition.pipeline == Pipeline::FullContext {
-        match build_full_context(engine, &item.persona_uid, condition.budget_chars as usize).await {
-            Ok(text) => Some(text),
-            Err(error) => return ItemRun::failed(item, condition, &error, effective, line),
+    match ramaria_service::eval_llm_with_key(&config, Some(key)) {
+        Ok(provider) => {
+            engine.update_llm(provider);
+            tracing::info!(
+                condition = %condition_id,
+                model = %config.capability.model_id,
+                "评测专用密钥已接管答题模型"
+            );
         }
-    } else {
-        None
-    };
-
-    let mut attempt = 1u32;
-    loop {
-        let request = ChatSendRequest {
-            message: item.row.question.clone(),
-            persona: Some(item.persona_uid.clone()),
-            session_id: Some(session.id),
-            conversation_id: None,
-            channel: EVAL_CHANNEL.to_string(),
-        };
-        let options = EvalChatOptions {
-            as_of_ms: Some(item.row.ask_time_ms),
-            mask: condition.pipeline.mask(),
-            touch: false,
-            max_chars: Some(condition.budget_chars),
-            preset_context: preset_context.clone(),
-        };
-
-        match engine.chat_answer_eval(request, options).await {
-            Ok(outcome) => {
-                return ItemRun {
-                    record: RunItemRecord::success(
-                        item,
-                        condition,
-                        outcome,
-                        elapsed_ms(started),
-                        attempt,
-                        effective,
-                        line.clone(),
-                    ),
-                    success: true,
-                    attempts: attempt,
-                    error_kind: None,
-                };
-            }
-            Err(error) => {
-                if attempt > retry_limit {
-                    return ItemRun {
-                        record: RunItemRecord::failure(
-                            item,
-                            condition,
-                            &error.to_string(),
-                            elapsed_ms(started),
-                            attempt,
-                            effective,
-                            line.clone(),
-                        ),
-                        success: false,
-                        attempts: attempt,
-                        error_kind: Some(error_kind(&error)),
-                    };
-                }
-                tracing::debug!(
-                    question = %item.row.question_id,
-                    condition = %condition.id,
-                    attempt,
-                    error_kind = error_kind(&error),
-                    "评测题目重试"
-                );
-                attempt += 1;
-            }
-        }
+        Err(error) => tracing::warn!(
+            condition = %condition_id,
+            error = %error,
+            "评测专用密钥构造答题 provider 失败，沿用原 provider"
+        ),
     }
 }
 
@@ -508,11 +459,12 @@ fn fail_condition(
         if done.contains(&key) {
             continue;
         }
-        let record = RunItemRecord::failure(item, condition, reason, 0, 0, effective, line.clone());
+        let record =
+            RunItemRecord::failure(item, condition, reason, 0, 0, effective, None, line.clone());
         item::append(items_path, &record)?;
         written += 1;
     }
-    if let Some(entry) = condition_entry(state, &condition.id) {
+    if let Some(entry) = state.condition_mut(&condition.id) {
         entry.failed = written;
     }
     Ok(())
@@ -595,37 +547,10 @@ fn records_of(keys: &[state::ItemKey]) -> Vec<(String, String, bool)> {
         .collect()
 }
 
-/// 定位条件计数条目。
-fn condition_entry<'a>(
-    state: &'a mut RunState,
-    condition_id: &str,
-) -> Option<&'a mut state::ConditionState> {
-    state
-        .conditions
-        .iter_mut()
-        .find(|entry| entry.id == condition_id)
-}
-
 /// 关闭引擎连接池（Windows 上及时释放文件句柄）。
 async fn close_engine(engine: Engine) {
     if let Some(pool) = engine.sqlite_pool() {
         pool.close().await;
     }
     drop(engine);
-}
-
-/// 错误分类标识（日志与产物排查共用，不写完整错误正文）。
-fn error_kind(error: &RamariaError) -> &'static str {
-    match error {
-        RamariaError::Config { .. } => "config",
-        RamariaError::Storage { .. } => "storage",
-        RamariaError::Llm { .. } => "llm",
-        RamariaError::Serialization { .. } => "serialization",
-        RamariaError::Privacy { .. } => "privacy",
-        RamariaError::Index { .. } => "index",
-        RamariaError::Validation { .. } => "validation",
-        RamariaError::Io { .. } => "io",
-        RamariaError::Embedding { .. } => "embedding",
-        RamariaError::Unsupported { .. } => "unsupported",
-    }
 }
