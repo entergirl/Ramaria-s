@@ -2,7 +2,7 @@
 
 <img src="docs/images/logo.png" alt="Ramaria Logo" width="110">
 
-# 珊瑚菌 · Ramaria 3.0
+# 珊瑚菌 · Ramaria 3.1
 
 > 大模型懂一切，唯独不懂你。
 
@@ -32,19 +32,19 @@ Ramaria 给出另一种答案：**一个完全运行在你本机的长期记忆�
 
 ---
 
-## 3.0 新面貌
+## 3.1 新面貌
 
-3.0 是一次**后端收口 + 前端完全重写**的版本。它不扩张功能面，而是把 2.x 积累的能力收成一件可以直接使用的产品。
+3.1 不新增用户功能：把记忆能力变成可复现的数字，并修掉挡住这件事的缺陷。
 
-<img src="docs/images/getting-started/03-chat.png" alt="Ramaria 对话界面" width="720">
+- **可测量的记忆**：新增评测命令行 `ramaria eval`（dev-only，不随安装包发布），一条命令产出证据包（`run.json` / `items.jsonl` / `report.md` / `report.json`）；主证据语料 LifeBench 2.0（中英同题），六个命题 H1~H6 各有结论。
+- **沙盒调参**：把一段对话贴进临时库，跑完整管线，逐通道看召回与注入 token；不写用户库、不改用户配置。
+- **证据链**：L1 摘要记录覆盖的消息区间，任意记忆单元可映射回原始消息；召回轨迹逐条记录候选、融合分、过滤原因与预算裁剪。
+- **首次配置闭环**：`ramaria setup` 支持非交互参数，脚本与自动化可直接完成配置；完成标记由服务层唯一写入。
+- **退出即封存**：桌面退出时先隐窗再限时封存活跃会话；后台循环收到停止广播立即退出，不再等待下一次轮询。
 
-- **启动不再卡死**：向量索引落库持久化（`memory_vectors`），启动只加载、缺失后台补算，**首条消息立即可发**，构建进度在界面可见。
-- **界面整体重写**：常驻珊瑚圆键导航取代侧边栏，**9 个视图**（对话 / 记忆 / 人格 / 规则 / 导入 / 设置 / 调试 + 首次配置与错误页），浅深双主题，设置页两级菜单。
-- **三条接入路径**：本地对话、MCP 接入（CodeBuddy / Trae 等）、QQ / Telegram 社交接入；三条路径共用同一份本地数据，各有一份可照着走通的文档。
-- **数据单基线**：新库 `data/ramaria.db`（29 张表），记忆与文档向量同库存放；2.x 的 `assistant.db` 不读取、不删除。
-- **工程收口**：单份测试基建 `ramaria-testkit`、单份 `MockStorage`、迁移驱动的测试库；契约面与结构自检进入 CI。
+> **3.1 是破坏性版本**：数据库单基线升级到 `schema_version=4`（`memory_l1` 增消息区间），3.0 的库不读、不迁移、不自动删除；请备份后删除或改名旧库。
 
-> **3.0 是破坏性版本**：数据库不通用、桌面端前端整体重写、旧 `assistant.db` 不迁移。要保留旧内容请在 2.x 上自行导出。
+> 版本号（`Cargo.toml` / 配置常量与模板 / `tauri.conf.json` / 前端 `package.json` 与锁文件）与 CPU / CUDA 两包已随本版更新。
 
 ---
 
@@ -141,7 +141,7 @@ Ramaria 的记忆不是“把聊天记录塞进 Prompt”，而是一套自下�
 
 ## 界面一览
 
-3.0 没有侧边栏和页眉：全部导航由一个常驻的圆键完成。核心键 🪸 展开后进入各视图；主题、设置与关于收在圆键上；圆键可拖动或选择 5 个位置预设。
+界面没有侧边栏和页眉：全部导航由一个常驻的圆键完成。核心键 🪸 展开后进入各视图；主题、设置与关于收在圆键上；圆键可拖动或选择 5 个位置预设。
 
 | 视图 | 功能 |
 |------|------|
@@ -171,10 +171,12 @@ Ramaria 的记忆不是“把聊天记录塞进 Prompt”，而是一套自下�
 
 ### 两个安装包
 
+> 3.1.0 两包由 `python scripts/build_installer.py --variant <cpu|cuda>` 构建；下表为实际产物大小与 SHA-256。
+
 | 平台 | 文件 | 大小 | SHA-256 |
 |------|------|------|---------|
-| **Windows x64（CPU，推荐）** | `Ramaria_3.0.0_x64-setup.exe` | 13.5 MB（14,110,176 字节） | `E9DC4BD4BCD9E004BE486ACB33FC091B99FE424CF643049A7ADB6F2BDCD0444C` |
-| Windows x64（CUDA） | `Ramaria_3.0.0_x64-cuda-setup.exe` | 13.9 MB（14,621,281 字节） | `5B9BEE9589FD4B6F57DCCF351605B30F8898AAC119518E023E3A511F540DEC28` |
+| **Windows x64（CPU，推荐）** | `Ramaria_3.1.0_x64-setup.exe` | 13.5 MB（14,173,232 字节） | `E6FA551234137CD2DC4536FD72707F28119C97E55F17228271A303464AC02305` |
+| Windows x64（CUDA） | `Ramaria_3.1.0_x64-cuda-setup.exe` | 14.0 MB（14,680,891 字节） | `AD3B368B1BF2C26508C2829C86B2A4FE90C058C225E7C53E05C1D7A534A40BFD` |
 
 - 下载页把 CPU 包放在首位；不确定选哪个时，先用 CPU 包。
 - CUDA 包面向有 NVIDIA 显卡且安装了系统 CUDA 运行时的机器；缺少驱动或运行时时嵌入自动回退 CPU，不会崩溃。
@@ -199,7 +201,7 @@ Ramaria 的记忆不是“把聊天记录塞进 Prompt”，而是一套自下�
 2. **嵌入模型**：选择本地模型文件夹（需含 `config.json`、`tokenizer.json` 与权重文件），点「校验模型路径」；也可以跳过，跳过只影响语义检索，不影响对话。
 3. **确认并进入**：核对摘要后保存，直接进入对话页，不等待索引构建。
 
-> 3.0 没有应用内嵌入模型下载入口，请自备模型文件（默认 `bge-small-zh-v1.5` 约 100 MB；可选 `Qwen3-Embedding-0.6B` 约 1.2 GB）。模型下载命令已具备，但界面入口留待后续版本。
+> 当前版本没有应用内嵌入模型下载入口，请自备模型文件（默认 `bge-small-zh-v1.5` 约 100 MB；可选 `Qwen3-Embedding-0.6B` 约 1.2 GB）。模型下载命令已具备，但界面入口留待后续版本。
 
 首次使用线上 API 时会弹出隐私确认，勾选「我已知晓上述数据范围与去向」并确认后才会发送至云端；LM Studio 本地模式下不会出现该提示。CLI 首次调用线上服务时另有交互确认。
 
@@ -244,13 +246,13 @@ Ramaria 本身免费开源（MIT 协议）。费用仅来自所选的模型后�
 不会。API Key 交由 Windows 凭据管理器保管，不写入配置文件或日志；导出诊断信息时也会自动脱敏。
 
 **Q：如果软件判断错误怎么办？**
-性格判断均带有置信度，样本不足时会标注「数据不足」而非强行下结论；行为规则可随时编辑或禁用，每条判断都附有证据链。3.0 的人格画像不提供逐条特质编辑，可修正名称、描述与头像，或重载画像。
+性格判断均带有置信度，样本不足时会标注「数据不足」而非强行下结论；行为规则可随时编辑或禁用，每条判断都附有证据链。当前版本的人格画像不提供逐条特质编辑，可修正名称、描述与头像，或重载画像。
 
 **Q：对话支持 Markdown 或直接发图片给模型吗？**
-3.0 的对话正文按纯文本渲染，Markdown 语法按原文显示；本地发图会存入会话，开启图片理解时后台生成描述，但 3.0 还不支持把当轮图片直接作为对话模型输入。
+当前版本的对话正文按纯文本渲染，Markdown 语法按原文显示；本地发图会存入会话，开启图片理解时后台生成描述，但当前版本还不支持把当轮图片直接作为对话模型输入。
 
 **Q：如何彻底删除数据？**
-设置页可导出会话与消息（JSON / Markdown；CLI 按人格导出时可附 L1 摘要），也可直接删除 `%APPDATA%\Ramaria\data\ramaria.db` 后重新开始。要保留完整记忆与向量，请先备份整个数据目录。2.x 的 `assistant.db` 不会被 3.0 读取，可自行删除。
+设置页可导出会话与消息（JSON / Markdown；CLI 按人格导出时可附 L1 摘要），也可直接删除 `%APPDATA%\Ramaria\data\ramaria.db` 后重新开始。要保留完整记忆与向量，请先备份整个数据目录。2.x 的 `assistant.db` 不会被当前版本读取，可自行删除。
 
 **Q：是否支持 macOS 或移动端？**
 目前仅提供 Windows 安装包；macOS / Linux 已列入路线图，移动端暂无计划。
@@ -262,7 +264,7 @@ Ramaria 本身免费开源（MIT 协议）。费用仅来自所选的模型后�
 ## 隐私与数据安全
 
 - **本地模型（LM Studio）**：数据不出本机，支持完全离线。
-- **云端 API（DeepSeek / OpenAI）**：当前对话、System Prompt 与召回的记忆会发送至所选服务商；3.0 起本地记忆恒随对话注入，不再提供关闭开关。首次使用需按「服务商 + 服务地址」完成隐私确认。
+- **云端 API（DeepSeek / OpenAI）**：当前对话、System Prompt 与召回的记忆会发送至所选服务商；本地记忆恒随对话注入，不提供关闭开关。首次使用需按「服务商 + 服务地址」完成隐私确认。
 - **图片理解**：开启「模型支持图片理解」且使用线上模型时，导入、社交与本地发图的图片会随理解请求外发；本地模型模式下只发往本机。
 - **API Key**：由 Windows 凭据管理器保管，不落明文。
 - **日志策略**：不记录完整对话原文，敏感信息自动截断或脱敏。
@@ -277,7 +279,7 @@ Ramaria 本身免费开源（MIT 协议）。费用仅来自所选的模型后�
 
 | 文档 | 面向读者 | 说明 |
 |------|---------|------|
-| [新手引导（3.0）](docs/getting-started.md) | 第一次使用 | 安装、三条接入路径（本地对话 / MCP / 社交）、记忆何时出现与常见问题 |
+| [新手引导](docs/getting-started.md) | 第一次使用 | 安装、三条接入路径（本地对话 / MCP / 社交）、记忆何时出现与常见问题 |
 | [桌面使用指南](docs/desktop-user-guide.md) | 使用者 | 9 视图、设置、导入、主动对话、社交与 MCP、故障排除 |
 | [CLI 使用指南](docs/cli-user-guide.md) | 进阶用户 / 开发者 | 21 个顶层子命令、配置与数据管理、MCP 与通道维护 |
 | [隐私说明](docs/privacy-notice.md) | 所有用户 | 数据位置、外发场景、密钥安全、日志与删除 |
@@ -291,7 +293,7 @@ Ramaria 本身免费开源（MIT 协议）。费用仅来自所选的模型后�
 <details>
 <summary><b>展开查看 crate 地图、依赖关系、关键口径与 CLI 速查</b></summary>
 
-### Crate 地图（11 个，含 dev-only testkit）
+### Crate 地图（12 个，含 dev-only eval / testkit）
 
 | Crate | 职责 |
 |---|---|
@@ -303,8 +305,9 @@ Ramaria 本身免费开源（MIT 协议）。费用仅来自所选的模型后�
 | `ramaria-service` | 唯一能力层：召回 / 生成 / 写入 / 封存 / 会话生命周期 |
 | `ramaria-channel` | 社交通道（QQ OneBot v11 / Telegram Bot API）协议壳与运行时 |
 | `ramaria-mcp` | MCP 协议壳（stdio，7 个工具） |
-| `ramaria-cli` | CLI 入口（21 个顶层子命令）+ 评估探针 |
+| `ramaria-cli` | CLI 入口（21 个顶层子命令） |
 | `ramaria-desktop` | Tauri 2 桌面壳（Vue 3 + Vite + TS 前端） |
+| `ramaria-eval` | dev-only 评测工具层（语料 / 基线 / 矩阵 / 判分 / 报告 / 沙盒；不随发行） |
 | `ramaria-testkit` | dev-only 测试基建（迁移驱动临时库、单份 MockStorage；不随发行） |
 
 ### 依赖关系（生产依赖）
@@ -323,17 +326,18 @@ ramaria-cli / ramaria-desktop        ramaria-mcp / ramaria-channel
 
 - 入口主路径一律经 `ramaria-service`；服务层禁止依赖任何入口层。
 - 上图为生产依赖；`ramaria-llm` 的 `ramaria-memory` / `ramaria-storage` 与 `ramaria-channel` 的 `ramaria-storage` 仅出现在 `dev-dependencies`，不计入运行期分层。
-- 入口直查例外只允许登记在 `ramaria-cli` 的探针与 `clusters` 只读命令；新增例外须先登记决策。
+- 入口直查例外只允许登记在 `ramaria-cli` 的 `clusters` 只读命令；新增例外须先登记决策。
 
-### 关键口径（3.0）
+### 关键口径（3.1）
 
 | 项 | 终值 |
 |---|---|
-| 数据库 | 单基线 migration `20261018_v3.0_schema.sql`；29 表 / 259 列 / 45 索引；`schema_version=3`；库文件 `ramaria.db` |
+| 数据库 | 单基线 migration `20261029_v3.1_schema.sql`；29 表 / 261 列 / 45 索引；`schema_version=4`；库文件 `ramaria.db` |
 | 向量 | `memory_vectors` 覆盖 L1 / L2 / utt；模型指纹 `model_id@dim#size`；启动只加载指纹匹配行，缺失后台补算 |
 | 索引状态 | `IndexStatus`（idle / building / ready / degraded）；`get_index_status` 命令 + `index-progress` 事件 |
 | 契约面 | 命令 85 / 事件 9 / CLI 顶层 21 / MCP 工具 7 / 配置 31 组 190 键 / 视图 9 |
 | 前端 | Vue 3 + Vite + TypeScript + Pinia + vue-router（hash）；单一 `frontend/` 目录 |
+| 评测 | `ramaria eval`（dev-only）：`run` / `corpus` / `baseline` / `score` / `report` / `oracle`；产物 `run.json` / `items.jsonl` / `report.md` / `report.json` |
 | 测试 | 分 crate 测试 + Vitest；`ramaria-testkit` 单份 MockStorage；五项门禁脚本 |
 
 ### 项目结构
@@ -350,6 +354,7 @@ crates/
 ├── ramaria-mcp/           # MCP 协议壳（stdio，7 工具）
 ├── ramaria-cli/           # CLI 入口（21 个子命令）
 ├── ramaria-desktop/       # Tauri 2 桌面应用（Vue 3 前端）
+├── ramaria-eval/          # dev-only 评测工具层（不随发行）
 └── ramaria-testkit/       # dev-only 测试基建（不随发行）
 config/
 ├── default.toml           # 默认配置模板（数值 SSOT）
@@ -362,6 +367,9 @@ docs/                      # 用户文档
 ```bash
 # 已有桌面配置的库：用 --db 指向桌面数据库
 ramaria --db "%APPDATA%\Ramaria\data\ramaria.db" status
+
+# 首次配置（非交互；密钥也可用 RAMARIA_API_KEY 环境变量）
+ramaria --db <库路径> setup --provider deepseek --model deepseek-chat --api-key <key>
 
 # 单条提问 / 交互式对话
 ramaria --db <库路径> ask "介绍一下你自己"
@@ -385,7 +393,7 @@ ramaria --db <库路径> export markdown
 ramaria --db <库路径> diagnostics --output diag.zip
 ```
 
-> 首次使用、全新库的 CLI 配置限制与完整参数见 [CLI 使用指南](docs/cli-user-guide.md)。
+> 首次使用与非交互配置的完整参数见 [CLI 使用指南](docs/cli-user-guide.md)。
 
 </details>
 
@@ -393,7 +401,16 @@ ramaria --db <库路径> diagnostics --output diag.zip
 
 ## 版本历史
 
-### v3.0.0 — 2026-10-27（发行 3.0.0）
+### v3.1.0 — 2026-11
+
+**「可测量的记忆」**：不新增用户功能，把记忆能力变成可复现的数字，并修掉挡住这件事的缺陷。
+
+- **评测**：dev-only `ramaria eval` 承载语料、基线、矩阵、判分、报告与沙盒；主证据 LifeBench 2.0，六命题 H1~H6 各有结论；报告带条件行与配对统计。
+- **证据链**：`memory_l1` 增 `start_msg_id` / `end_msg_id`；`memory_unit_sources` 把任意记忆单元映射回消息；召回轨迹记候选、融合分与预算裁剪。
+- **修复**：CLI 首次配置归口服务层并支持非交互参数；桌面退出先隐窗再限时封存，后台循环收到广播立即退出；索引未就绪时召回走存储直读 BM25；`enable_vector=false` 时零查询向量。
+- **破坏性**：`schema_version=4`，3.0 的库不读、不迁移。
+
+### v3.0.0 — 2026-10
 
 **「整合收口」**：把 2.x 堆起来的能力收成能直接用的产品。
 
@@ -404,18 +421,12 @@ ramaria --db <库路径> diagnostics --output diag.zip
 - **工程**：dev-only `ramaria-testkit` 与单份 `MockStorage`；迁移驱动测试库；五项契约与结构脚本入 CI；结构建议 82 → 25；`dead_code` 0 / let-chains 0。
 - **安装包**：CPU 13.5 MB / CUDA 13.9 MB，WebView2 在线引导。
 
-### v2.9.0 — 2026-10-17（发行 2.9.0）
-
-**「人格可编程与社交补强」**：人格第一次可以由你亲手定义——persona.toml 超集 / SillyTavern 角色卡导入后先预览、再直写人格画像；导入与手写的画像默认不被自动推断改写（Manual 保护）。同批完成提示词工程（查看器 + `[prompt]` 补丁）、社交四项修复、撤回与图片收发。2.x 的最后一版。
-
-> 更早版本与完整变更记录见 [CHANGELOG.md](CHANGELOG.md)。
-
 ---
 
 ## 路线图
 
-- **3.0.1**：补齐 3.0 的实机复验项——三条路径 30 分钟实测、可信线题集、两包冒烟、索引与旧库专项。
-- **3.1**：MCP 客户端化；对话多模态图片输入；vision 理解模型分离与长图分区 / OCR；平台扩展与多账号 / 多实例；Telegram 官方导出导入；应用内新手引导；表情资产管理 UI；模型下载 UI；全局降级条；长会话分页与 Markdown 只读渲染。
+- **3.2**：记忆与检索算法修复、机制参数重评；规模优化与长会话分页；英文语料下的语言适配。
+- **后续**：MCP 客户端化；对话多模态图片输入；vision 理解模型分离与长图分区 / OCR；平台扩展与多账号 / 多实例；Telegram 官方导出导入；应用内新手引导；表情资产管理 UI；模型下载 UI；长会话 Markdown 只读渲染。
 - **更远**：macOS / Linux 安装包、TUI、SQLCipher、Portable 模式等。
 - **已退休**：插件系统与常驻服务（D-V29-003），不再立项。
 

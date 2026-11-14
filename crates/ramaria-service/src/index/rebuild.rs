@@ -157,7 +157,9 @@ async fn build_and_swap_inner(engine: &Engine) -> RamariaResult<usize> {
     };
     let mut vector_map: HashMap<vectors::VectorKey, Vec<f32>> = HashMap::new();
     let mut missing: Vec<vectors::MissingVector> = Vec::new();
+    let mut vector_read_ms = 0i64;
     if let Some(plan) = &vector_plan {
+        let read_started = now_ms();
         match storage.load_memory_vectors(&plan.fingerprint).await {
             Ok(rows) => vector_map = vectors::load(rows, plan.dimension),
             Err(e) => {
@@ -165,6 +167,7 @@ async fn build_and_swap_inner(engine: &Engine) -> RamariaResult<usize> {
             }
         }
         missing = vectors::collect_missing(&l1_views, &l2_views, &utt_blocks, &vector_map);
+        vector_read_ms = now_ms().saturating_sub(read_started);
     }
     let mut loaded = vector_docs_total.saturating_sub(missing.len());
     let model_label = vector_plan.as_ref().map(|plan| plan.model_id.clone());
@@ -179,6 +182,7 @@ async fn build_and_swap_inner(engine: &Engine) -> RamariaResult<usize> {
         // 空词典 = 纯 bigram 等价口径：重建总是显式注入，保证口径可预期
         fresh.set_bm25_dictionary(&migration.dictionary);
     }
+    let attach_started = now_ms();
     for doc in &l1_views {
         fresh.index_l1_with_vector(
             doc,
@@ -197,6 +201,11 @@ async fn build_and_swap_inner(engine: &Engine) -> RamariaResult<usize> {
             vectors::lookup(&vector_map, VECTOR_DOC_UTT, &block.id.to_string()),
         );
     }
+    let vector_attach_ms = if vector_plan.is_some() {
+        now_ms().saturating_sub(attach_started)
+    } else {
+        0
+    };
 
     // ---- 4. 图谱构建（事件为实体节点、事件关系为边）----
     // 无论 `enable_graph` 开关值如何都构建（数据量小；检索期由
@@ -271,6 +280,8 @@ async fn build_and_swap_inner(engine: &Engine) -> RamariaResult<usize> {
         graph_edges = graph_edges.len(),
         vectors = loaded,
         vector_docs = vector_docs_total,
+        vector_read_ms = vector_read_ms,
+        vector_attach_ms = vector_attach_ms,
         elapsed_ms = now_ms().saturating_sub(started),
         bm25_version = stamp.bm25_version,
         "检索索引已加载（共 {total} 条文档）"

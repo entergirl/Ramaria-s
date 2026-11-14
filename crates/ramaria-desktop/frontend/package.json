@@ -1,6 +1,6 @@
 {
   "name": "ramaria-frontend",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "private": true,
   "type": "module",
   "description": "Ramaria 桌面端前端（Vue 3 + Vite + TypeScript）",

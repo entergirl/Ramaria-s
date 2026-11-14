@@ -7,6 +7,44 @@
 
 ---
 
+## [3.1.0] - 2026-11-15
+
+### 版本定位
+
+**「可测量的记忆」**：不新增用户功能，把记忆能力变成可复现的数字，并修掉挡住这件事的缺陷。本版是破坏性版本：数据库单基线升级到 `schema_version=4`，3.0 的库不读、不迁移。发行 3.1.0（五处版本号与 CPU / CUDA 两包由发行批次执行）。
+
+### 升级须知
+
+- **数据库不通用（破坏性）**：单基线 migration 重建为 `20261029_v3.1_schema.sql`，`schema_version=4`，`memory_l1` 增 `start_msg_id` / `end_msg_id`（TEXT NULL）。3.0 的 `ramaria.db` 启动即拒绝，不读、不迁移、不自动删除；请备份后删除或改名。
+- **`probe` 命令移除**：`ramaria probe` 及其子命令删除，能力迁入 `ramaria eval`；顶层子命令数保持 21。
+- **CLI 全局 `--skip-validate` 移除**：由 `setup --no-validate` 取代。
+
+### 新增功能
+
+- **评测工具层**：新增 dev-only crate `ramaria-eval` 与 `ramaria eval` 命令（`run` / `corpus` / `baseline` / `score` / `report` / `oracle`，无参进入评测台）；一条命令产出 `run.json` / `items.jsonl` / `report.md` / `report.json`。不随安装包发布。
+- **沙盒**：贴对话到临时库跑完整管线，查看召回 trace 与答案；不写用户库、不改用户配置；TTY 为评测台 TUI，非 TTY 回退行模式。
+- **语料与基线**：LifeBench 2.0（Apache-2.0，中英同题）注册与本地 SHA-256 校验；五档规模与跨度基线（`u1-m1` / `u1-q1` / `u1-y1` / `u5-y1` / `u10-y1`）；指纹与 `VACUUM INTO` 快照。
+- **矩阵与判分**：管线轴（分层 / 逐层消融 / flat-RAG / full-context）× 预算 × 答题模型；检索层双口径、分项判分（三次投票 + 分歧率）、可信层拒答率与虚假前提接受率、压缩层 oracle。
+- **报告**：条件行、九类 Macro、配对比较（bootstrap CI / Wilcoxon / BH-FDR）、H1~H6 结论、缺项三态；桌面调试页只读识别评测报告并显示结论块。
+- **召回轨迹**：可选 `RecallTrace` 记录四通道候选与原始分、融合分、衰减后分、过滤原因与预算裁剪前后条目；默认不采集，不落产品库。
+- **证据映射**：`memory_unit_sources` 把 L1 / L2 / L3 / utt 映射为消息 id 集合；L1 生成写入消息区间。
+- **级联入口**：`Engine::cascade(persona_uid, until)` 与调度循环共用触发实现，供无桌面环境脚本化加工。
+- **查询时钟**：召回可选 `as_of`，同时作衰减基准与未来过滤线；产品入口不传，行为不变。
+- **CLI 非交互配置**：`ramaria setup` 增 `--provider` / `--base-url` / `--model` / `--api-key`（或 `RAMARIA_API_KEY`）/ `--embedding-path` / `--no-validate`，缺省仍为交互。
+
+### 修复
+
+- **CLI 首次配置**：向导归口 `Engine::run_setup`，`settings.setup_completed_at` 由服务层唯一写入；全新库配完后 `ask` / `chat` 不再被状态门禁拒绝。
+- **桌面退出封存**：退出先隐窗，再限时停止通道与封存活跃会话；三个后台循环改为停止广播唤醒（不再等下一次轮询），超时只记 warn；封存超时按「已关闭且无 L1」登记补扫。
+- **首问降级**：索引未就绪时召回从存储直读 BM25，不在召回路径同步构建全库。
+- **关向量零嵌入**：`enable_vector=false` 时召回不生成查询向量，utt 向量通道同批跳过。
+
+### 移除
+
+- `probe` 命令与 CLI 探针模块；`corpus fetch` 与评测侧 HTTP 下载依赖（语料由用户自备，只做本地校验）。
+
+---
+
 ## [3.0.0] - 2026-10-27
 
 ### 版本定位
