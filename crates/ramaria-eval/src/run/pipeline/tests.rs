@@ -5,6 +5,7 @@
 //! - 顺序写出用假执行器制造"后题先完成"，断言产物顺序仍是题集顺序
 //! - 并发上限用峰值在飞数断言：默认值不超过 4 且大于 1，1 路恒为 1
 //! - 串行与并发各跑一遍，逐题标识、回复与用量总量一致，只有耗时不同
+//! - 取消只写已派发的前缀；重试计数按题收敛，失败后成功不留失败计数
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -173,6 +174,25 @@ fn success(
     }
 }
 
+/// 构造一条失败结果（含累计尝试次数）。
+fn failure(item: &RunItem, condition: &Condition, line: &ConditionLine, attempts: u32) -> ItemRun {
+    ItemRun {
+        record: RunItemRecord::failure(
+            item,
+            condition,
+            "模拟失败",
+            1,
+            attempts,
+            "local-model",
+            None,
+            line.clone(),
+        ),
+        success: false,
+        attempts,
+        error_kind: Some("llm"),
+    }
+}
+
 /// 读出逐题产物的全部记录（一行一题）。
 fn read_records(items_path: &Path) -> Vec<RunItemRecord> {
     let text = std::fs::read_to_string(items_path).expect("产物应可读取");
@@ -191,6 +211,7 @@ async fn fake_run(dir: &Path, concurrency: usize, items: &[RunItem]) -> Vec<RunI
     let mut done = HashSet::new();
     let mut attempts = HashMap::new();
     let started = Instant::now();
+    let control = RunControl::default();
     let jobs: Vec<(usize, &RunItem)> = items.iter().enumerate().collect();
     {
         let mut sink = ItemSink::new(
@@ -201,6 +222,7 @@ async fn fake_run(dir: &Path, concurrency: usize, items: &[RunItem]) -> Vec<RunI
             &mut attempts,
             &mut state,
             started,
+            &control,
         );
         ordered_run(
             jobs,
@@ -220,7 +242,7 @@ async fn fake_run(dir: &Path, concurrency: usize, items: &[RunItem]) -> Vec<RunI
                     + 1;
                 async move {
                     tokio::time::sleep(Duration::from_millis(if slow { 20 } else { 1 })).await;
-                    success(item, condition, line, &text, tokens)
+                    Some(success(item, condition, line, &text, tokens))
                 }
             },
             |outcome| sink.write(outcome),
@@ -340,7 +362,7 @@ async fn in_flight_items_stay_within_limit() {
                     peak.fetch_max(current, Ordering::SeqCst);
                     tokio::time::sleep(Duration::from_millis(5)).await;
                     in_flight.fetch_sub(1, Ordering::SeqCst);
-                    success(item, condition, line, "r", 1)
+                    Some(success(item, condition, line, "r", 1))
                 }
             },
             |outcome| {
@@ -405,4 +427,178 @@ async fn serial_and_concurrent_products_agree() {
 
     cleanup(&serial_dir);
     cleanup(&concurrent_dir);
+}
+
+// =========================================================
+// 取消与计数
+// =========================================================
+
+/// 取消只让尾部任务返回 None：已派发结果全部写出，不因缺号留在缓冲。
+///
+/// 说明: 未执行的任务不插入有序缓冲、不占序号；取消是单调的，None 只出现在
+/// 已派发段之后，因此游标不会因漏号停住，已启动的题也不会丢。
+#[tokio::test]
+async fn cancelled_tail_does_not_block_dispatched_results() {
+    let jobs: Vec<(usize, usize)> = (0..6).map(|seq| (seq, seq)).collect();
+    let mut written = Vec::new();
+    ordered_run(
+        jobs,
+        3,
+        |seq| async move {
+            if seq >= 3 {
+                return None;
+            }
+            Some(seq)
+        },
+        |seq| {
+            written.push(seq);
+            Ok(())
+        },
+    )
+    .await
+    .expect("执行应成功");
+
+    assert_eq!(
+        written,
+        vec![0, 1, 2],
+        "已派发的三条结果应全部写出，尾部取消项不阻塞也不写出"
+    );
+}
+
+/// 取消后不再派新题：写出的都是取消前已在飞的题，且保持题目原顺序。
+#[tokio::test]
+async fn cancel_keeps_in_flight_items_and_stops_dispatch() {
+    let dir = temp_dir("cancel");
+    std::fs::create_dir_all(&dir).expect("目录应可创建");
+    let items_path = dir.join("items.jsonl");
+    let items: Vec<RunItem> = (0..8).map(|index| item(&format!("q{index}"))).collect();
+    let condition = condition(Pipeline::Layered);
+    let line = line();
+    let mut state = run_state(&condition.id, items.len());
+    let mut done = HashSet::new();
+    let mut attempts = HashMap::new();
+    let control = RunControl::default();
+    let started_at = Instant::now();
+    let started_jobs = Arc::new(AtomicUsize::new(0));
+    let jobs: Vec<(usize, &RunItem)> = items.iter().enumerate().collect();
+    {
+        let mut sink = ItemSink::new(
+            &items_path,
+            &dir,
+            &condition.id,
+            &mut done,
+            &mut attempts,
+            &mut state,
+            started_at,
+            &control,
+        );
+        ordered_run(
+            jobs,
+            2,
+            |item| {
+                let counter = Arc::clone(&started_jobs);
+                let control = &control;
+                let condition = &condition;
+                let line = &line;
+                async move {
+                    if control.is_cancelled() {
+                        return None;
+                    }
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                    Some(success(item, condition, line, "r", 1))
+                }
+            },
+            |outcome| {
+                sink.write(outcome)?;
+                // 首题写出即中断：其余未派发的题不应再启动。
+                control.cancel();
+                Ok(())
+            },
+        )
+        .await
+        .expect("执行应成功");
+    }
+    let records = read_records(&items_path);
+    let started_jobs = started_jobs.load(Ordering::SeqCst);
+    assert!(
+        records.len() < items.len(),
+        "中断后不应把全部题目写出，实际 {}",
+        records.len()
+    );
+    assert_eq!(
+        records.len(),
+        started_jobs,
+        "已启动的题都应写出，未启动的题不应写出"
+    );
+    let ids: Vec<&str> = records
+        .iter()
+        .map(|record| record.question_id.as_str())
+        .collect();
+    let expected: Vec<String> = (0..records.len())
+        .map(|index| format!("q{index}"))
+        .collect();
+    assert_eq!(
+        ids,
+        expected.iter().map(String::as_str).collect::<Vec<_>>(),
+        "写出的题应是题集前缀（取消只发生在派发之后）"
+    );
+    assert_eq!(
+        state.conditions[0].completed,
+        records.len(),
+        "完成计数应与写出行数一致"
+    );
+    cleanup(&dir);
+}
+
+/// 重试计数不虚高：失败后成功只留完成，同一题再次失败只留一个失败。
+#[test]
+fn retry_keeps_condition_counts_exact() {
+    let dir = temp_dir("retry");
+    std::fs::create_dir_all(&dir).expect("目录应可创建");
+    let items_path = dir.join("items.jsonl");
+    let items: Vec<RunItem> = (0..2).map(|index| item(&format!("q{index}"))).collect();
+    let condition = condition(Pipeline::Layered);
+    let line = line();
+    let mut state = run_state(&condition.id, items.len());
+    let mut done = HashSet::new();
+    let mut attempts = HashMap::new();
+    let control = RunControl::default();
+    {
+        let mut sink = ItemSink::new(
+            &items_path,
+            &dir,
+            &condition.id,
+            &mut done,
+            &mut attempts,
+            &mut state,
+            Instant::now(),
+            &control,
+        );
+        // 第一题：失败一次后成功，失败计数应回退。
+        sink.write(failure(&items[0], &condition, &line, 1))
+            .expect("失败行应可写出");
+        sink.write(success(&items[0], &condition, &line, "r", 1))
+            .expect("成功行应可写出");
+        // 第二题：连续两次失败，失败计数只应加一次。
+        sink.write(failure(&items[1], &condition, &line, 1))
+            .expect("失败行应可写出");
+        sink.write(failure(&items[1], &condition, &line, 2))
+            .expect("失败行应可写出");
+    }
+
+    assert_eq!(state.conditions[0].completed, 1, "完成数应只含成功题");
+    assert_eq!(state.conditions[0].failed, 1, "失败数应按题计而非按行计");
+    assert!(
+        !attempts.contains_key(&(condition.id.clone(), "q0".to_string())),
+        "成功题应移出重试记录"
+    );
+    assert_eq!(
+        attempts.get(&(condition.id.clone(), "q1".to_string())),
+        Some(&2),
+        "再次失败的题应保留最新尝试次数"
+    );
+    let records = read_records(&items_path);
+    assert_eq!(records.len(), 4, "四行都应按写出顺序落盘");
+    cleanup(&dir);
 }

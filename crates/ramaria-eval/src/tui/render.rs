@@ -61,7 +61,7 @@ fn draw_backend(frame: &mut Frame, app: &App) {
     }
     frame.render_widget(status_line(app.status.as_deref()), chunks[3]);
     frame.render_widget(
-        footer("Tab 切换  ←→ 改来源  Ctrl+Enter/F5 下一步  Esc 退出"),
+        footer("Tab 切换  ←→ 改来源  Ctrl+Enter/F5 下一步  Esc 返回评测台"),
         chunks[4],
     );
 }
@@ -295,7 +295,7 @@ fn draw_running(frame: &mut Frame, app: &App) {
         chunks[1],
     );
 
-    frame.render_widget(footer("处理中… Ctrl+C 退出"), chunks[2]);
+    frame.render_widget(footer("处理中… Ctrl+C 返回评测台"), chunks[2]);
 }
 
 /// 单条阶段行：状态前缀按状态着色，正文与行模式口径一致。
@@ -343,7 +343,7 @@ fn draw_result(frame: &mut Frame, app: &App) {
         chunks[1],
     );
 
-    frame.render_widget(footer("Tab/←→ 切换  ↑↓ 滚动  q 退出"), chunks[2]);
+    frame.render_widget(footer("Tab/←→ 切换  ↑↓ 滚动  q 返回评测台"), chunks[2]);
 }
 
 /// 结果页标签行，当前页高亮。
@@ -505,7 +505,7 @@ fn draw_error(frame: &mut Frame, app: &App) {
         chunks[1],
     );
 
-    frame.render_widget(footer("Esc 返回后端  q 退出"), chunks[2]);
+    frame.render_widget(footer("Esc 返回后端  q 返回评测台"), chunks[2]);
 }
 
 // =========================================================

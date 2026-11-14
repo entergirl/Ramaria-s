@@ -195,7 +195,7 @@ pub(crate) enum Commands {
     #[command(display_order = 50)]
     Status,
 
-    /// 评测（无参进入沙盒界面；run / corpus / baseline / score / report）[高级]
+    /// 评测（无参进入评测台，默认沙盒；run / corpus / baseline / score / report）[高级]
     #[command(display_order = 51)]
     Eval(EvalArgs),
 

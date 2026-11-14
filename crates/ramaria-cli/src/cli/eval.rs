@@ -36,10 +36,10 @@ impl std::fmt::Display for BackendModeArg {
     }
 }
 
-/// 评测子命令组（无子命令时进入沙盒界面）。
+/// 评测子命令组（无子命令时进入评测台，默认沙盒）。
 #[derive(Args)]
 pub(crate) struct EvalArgs {
-    /// 沙盒后端来源（只对无子命令的沙盒生效）
+    /// 评测台沙盒的后端来源（只对无子命令调用生效）
     #[arg(long, value_enum, default_value_t = BackendModeArg::Inherit)]
     pub(crate) backend: BackendModeArg,
 
@@ -55,7 +55,7 @@ pub(crate) struct EvalArgs {
     #[arg(long)]
     pub(crate) embedding_path: Option<PathBuf>,
 
-    /// 评测子命令（缺省进入沙盒界面）
+    /// 评测子命令（缺省进入评测台，默认沙盒）
     #[command(subcommand)]
     pub(crate) command: Option<EvalCmd>,
 }

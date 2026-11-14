@@ -5,6 +5,7 @@
 //! - 题目保持 qa.jsonl 原顺序，不可回答题保留供可信层统计
 //! - persona 标识由 sample_key 直接推导，不依赖语料文件
 //! - 全局上限跨档位累计，截断只发生在题目边界
+//! - 计划规模与题集同源：抽样与上限复用运行器口径，预览不改动档位
 //! - 只读档位产物，不碰引擎与数据库
 
 use std::path::{Path, PathBuf};
@@ -15,6 +16,7 @@ use crate::baseline::{
     ARTIFACT_KIND, ARTIFACT_SCHEMA_VERSION, BaselineManifest, MANIFEST_FILE, QRELS_FILE, QrelsRow,
 };
 
+use super::matrix::RunMatrix;
 use super::workspace::BaselineProduct;
 
 #[cfg(test)]
@@ -179,4 +181,66 @@ pub fn plan_items(tiers: &[BaselineTier], limit: Option<usize>) -> Vec<RunItem> 
 /// sample_key → 人格标识。
 fn persona_uid(sample_key: &str) -> String {
     format!("{PERSONA_UID_PREFIX}{sample_key}")
+}
+
+// =========================================================
+// 计划规模
+// =========================================================
+
+/// 矩阵在给定档位下的计划规模（预览用，不装配引擎）。
+///
+/// 字段约定:
+/// - `per_tier`: 各档位计划题数（抽样与全局上限之后），顺序同矩阵档位；
+/// - `conditions`: 条件总数（档位 × 管线 × 预算 × 答题模型）；
+/// - `questions`: 计划题目数（各档位题数之和）；
+/// - `executions`: 计划条目数（每档题数 × 该档条件数）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PlanCounts {
+    pub(crate) per_tier: Vec<(String, usize)>,
+    pub(crate) conditions: usize,
+    pub(crate) questions: usize,
+    pub(crate) executions: usize,
+}
+
+/// 按运行器口径计算计划规模。
+///
+/// 参数:
+/// - `matrix`: 矩阵定义；
+/// - `tiers`: 已加载的档位（未抽样），顺序即题目顺序。
+///
+/// 返回:
+/// - 与 `plan_items` 一致的题数：先按 `run.question_sample` 取每档选中数，
+///   再按 `run.question_limit` 跨档位累计截断；
+/// - 条件数按 `matrix.conditions()` 计，条数为各档题数乘以该档条件数。
+///
+/// 说明: 只读取行，不修改档位；抽样结果与运行器同源（同一个 `sample_tier`）。
+pub(crate) fn plan_counts(matrix: &RunMatrix, tiers: &[BaselineTier]) -> PlanCounts {
+    let per_tier_conditions =
+        matrix.run.pipelines.len() * matrix.run.budgets.len() * matrix.answer_models.len();
+    let mut per_tier = Vec::with_capacity(tiers.len());
+    let mut remaining = matrix.run.question_limit;
+    for tier in tiers {
+        let available = match matrix.run.question_sample {
+            Some(budget) => {
+                super::sample::sample_tier(&tier.manifest.tier.id, &tier.rows, budget)
+                    .1
+                    .selected
+            }
+            None => tier.rows.len(),
+        };
+        let take = remaining.map_or(available, |left| available.min(left));
+        remaining = remaining.map(|left| left.saturating_sub(take));
+        per_tier.push((tier.manifest.tier.id.clone(), take));
+    }
+    let questions = per_tier.iter().map(|(_, count)| count).sum();
+    let executions = per_tier
+        .iter()
+        .map(|(_, count)| count * per_tier_conditions)
+        .sum();
+    PlanCounts {
+        per_tier,
+        conditions: matrix.conditions().len(),
+        questions,
+        executions,
+    }
 }

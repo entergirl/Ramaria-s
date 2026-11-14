@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 
 use ramaria_core::error::{RamariaError, RamariaResult};
 
-use crate::run::{Pipeline, RUN_FILE, RunMatrix, RunReport, RunState, execute, load_tiers};
+use crate::run::{
+    Pipeline, RUN_FILE, RunControl, RunMatrix, RunReport, RunState, execute, load_tiers,
+};
 
 #[cfg(test)]
 mod tests;
@@ -43,7 +45,7 @@ pub async fn run(run_id: &str, output: Option<PathBuf>) -> RamariaResult<RunRepo
     let matrix = freeze(state.matrix);
     let tiers = load_tiers(&cwd, &matrix, None)?;
     let root = output.unwrap_or_else(|| base.join(ORACLE_DIR));
-    execute(matrix, root, tiers).await
+    execute(matrix, root, tiers, RunControl::default()).await
 }
 
 /// 冻结矩阵：管线轴换成 oracle 预置上下文，其余轴保持不变。

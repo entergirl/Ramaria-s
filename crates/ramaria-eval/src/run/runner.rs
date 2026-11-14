@@ -3,11 +3,10 @@
 //! 设计特点:
 //! - 条件 → 题目两层循环：条件只跑本题集档位，题目按枚举顺序推进
 //! - 失败不中断：单题重试到上限后写失败行继续；条件级失败写告警并把未完成题记为失败
-//! - 断点续跑：已完成题跳过，失败题按末行尝试次数判断是否超限
+//! - 断点续跑与状态落盘：已完成题跳过；状态按批落盘、逐题产物逐行追加，中断后都能就地恢复
 //! - 分层抽样只过滤题集：报告落 sample.json，续跑复用同一批题号
-//! - 状态按批落盘、逐题产物逐行追加，中断后两者都能就地恢复
-//! - 云端答题模型可用进程内密钥覆盖（评测专用密钥），只在内存生效，不落库
-//! - 日志只记题目标识 / 条件 / 耗时 / 错误分类，不记问题与回复正文与密钥内容
+//! - 协作式中断：只在条件边界与逐题派发处检查取消，在飞题目写完再收尾
+//! - 进度事件与密钥：事件只带计数与题号，不记问题、回复与密钥；云端答题模型可用进程内密钥覆盖（只在内存生效，不落库）
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -22,6 +21,7 @@ use sha2::{Digest, Sha256};
 use crate::baseline::MANIFEST_FILE;
 use crate::measure::elapsed_ms;
 
+use super::control::{ConditionPlan, RunControl, RunEvent, RunStarted};
 use super::item::{self, ConditionLine, RunItemRecord};
 use super::matrix::{Condition, Pipeline, RunMatrix};
 use super::oracle_context::OracleCache;
@@ -57,6 +57,7 @@ const RUN_ID_PREFIX: &str = "run-";
 /// - `total`: 计划条目数（题 × 匹配条件）；
 /// - `completed` / `failed`: 定案计数，两者互斥；
 /// - `elapsed_ms`: 从进入命令到收尾的耗时；
+/// - `status`: 收尾状态（全部跑完为完成，协作中断为中断）；
 /// - `warnings`: 条件级降级与跳过的提示。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunReport {
@@ -66,18 +67,20 @@ pub struct RunReport {
     pub completed: usize,
     pub failed: usize,
     pub elapsed_ms: u64,
+    pub status: RunStatus,
     pub warnings: Vec<String>,
 }
 
 impl RunReport {
-    /// 渲染为人读摘要（路径 + 计数 + 告警）。
+    /// 渲染为人读摘要（状态 + 路径 + 计数 + 告警）。
     pub fn render(&self) -> String {
         let mut output = String::new();
         let _ = writeln!(
             output,
-            "运行 {} 完成（{} ms）:",
+            "运行 {} 结束（{} ms）:",
             self.run_id, self.elapsed_ms
         );
+        let _ = writeln!(output, "  状态: {}", status_label(self.status));
         let _ = writeln!(output, "  路径: {}", self.root.display());
         let _ = writeln!(
             output,
@@ -91,6 +94,15 @@ impl RunReport {
             }
         }
         output
+    }
+}
+
+/// 状态的人读文案。
+fn status_label(status: RunStatus) -> &'static str {
+    match status {
+        RunStatus::Running => "运行中",
+        RunStatus::Completed => "完成",
+        RunStatus::Aborted => "中断",
     }
 }
 
@@ -113,6 +125,24 @@ pub async fn run(
     matrix_path: Option<PathBuf>,
     output: Option<PathBuf>,
 ) -> RamariaResult<RunReport> {
+    run_with_control(corpus, matrix_path, output, RunControl::default()).await
+}
+
+/// 带取消开关与进度事件的批量运行。
+///
+/// 参数:
+/// - `corpus` / `matrix_path` / `output`: 同 [`run`]；
+/// - `control`: 取消开关与事件出口；默认对象等价于无人订阅。
+///
+/// 说明:
+/// - 矩阵读取、档位加载与运行根解析与 [`run`] 完全共用；
+/// - 事件只描述进度，取消只在条件边界与逐题派发处生效。
+pub(crate) async fn run_with_control(
+    corpus: Option<String>,
+    matrix_path: Option<PathBuf>,
+    output: Option<PathBuf>,
+    control: RunControl,
+) -> RamariaResult<RunReport> {
     let cwd = current_dir()?;
 
     // ---- 矩阵 ----
@@ -123,7 +153,7 @@ pub async fn run(
     let matrix = RunMatrix::load(&matrix_path)?;
     let tiers = load_tiers(&cwd, &matrix, corpus.as_deref())?;
     let root = run_root(&cwd, output);
-    execute(matrix, root, tiers).await
+    execute(matrix, root, tiers, control).await
 }
 
 /// 读取矩阵引用的全部基线档位。
@@ -164,7 +194,8 @@ pub(crate) fn load_tiers(
 /// 参数:
 /// - `matrix`: 本次冻结的矩阵（含管线与预算轴）；
 /// - `root`: 运行根目录（已存在则续跑）；
-/// - `tiers`: 已加载的档位，顺序即题目顺序。
+/// - `tiers`: 已加载的档位，顺序即题目顺序；
+/// - `control`: 取消开关与进度事件出口。
 ///
 /// 返回:
 /// - 成功时返回运行摘要；
@@ -172,11 +203,13 @@ pub(crate) fn load_tiers(
 ///
 /// 说明:
 /// - 只驱动生成与落盘，路径解析留给调用方，使 oracle 子命令可复用同一循环；
-/// - 矩阵声明抽样预算时先过滤题集，抽样报告在状态校验通过后落盘。
+/// - 矩阵声明抽样预算时先过滤题集，抽样报告在状态校验通过后落盘；
+/// - 取消在条件边界与逐题派发处检查，装配与索引重建不中途打断。
 pub(crate) async fn execute(
     matrix: RunMatrix,
     root: PathBuf,
     tiers: Vec<BaselineTier>,
+    control: RunControl,
 ) -> RamariaResult<RunReport> {
     // ---- 运行根与抽样 ----
     let workspace = RunWorkspace::new(&root)?;
@@ -211,19 +244,41 @@ pub(crate) async fn execute(
         .map(|key| (key.condition_id.clone(), key.question_id.clone()))
         .collect();
     let mut attempts = state::scan_attempts(&items_path)?;
+    control.emit(RunEvent::Started(RunStarted {
+        run_id: state.run_id.clone(),
+        root: root.clone(),
+        total_conditions: conditions.len(),
+        total_items: items.len(),
+        total_executions: state.conditions.iter().map(|entry| entry.total).sum(),
+        conditions: state
+            .conditions
+            .iter()
+            .map(|entry| ConditionPlan {
+                id: entry.id.clone(),
+                total: entry.total,
+                completed: entry.completed,
+                failed: entry.failed,
+            })
+            .collect(),
+    }));
 
     // ---- 条件循环 ----
     let started = Instant::now();
     let mut oracle = OracleCache::default();
-    for condition in &conditions {
+    for (index, condition) in conditions.iter().enumerate() {
+        if control.is_cancelled() {
+            break;
+        }
         let Some(tier) = tiers
             .iter()
             .find(|tier| tier.manifest.tier.id == condition.tier)
         else {
-            state.warnings.push(format!(
+            let message = format!(
                 "条件 {} 的档位 {} 不在本次题集内，已跳过",
                 condition.id, condition.tier
-            ));
+            );
+            state.warnings.push(message.clone());
+            emit_warning(&control, &condition.id, &message);
             continue;
         };
         let tier_items: Vec<&RunItem> = items
@@ -236,6 +291,30 @@ pub(crate) async fn execute(
             continue;
         }
 
+        // 待跑题目按原顺序编号：并发只改变执行时机，写出仍按这个序号收口。
+        // 装配与索引重建期间界面已能看到当前条件，取消仍只在派题前生效。
+        let jobs: Vec<(usize, &RunItem)> = tier_items
+            .iter()
+            .copied()
+            .filter(|item| {
+                let key = (condition.id.clone(), item.row.question_id.clone());
+                !should_skip(&done, &attempts, &key, matrix.run.retry_limit)
+            })
+            .enumerate()
+            .collect();
+        if jobs.is_empty() {
+            // 该条件没有待跑题：不装配引擎、不重建索引，避免已完成的运行续跑时重扫全库。
+            tracing::debug!(condition = %condition.id, "评测条件无待跑题目，跳过装配");
+            emit_condition_done(&mut state, &control, &condition.id);
+            continue;
+        }
+        control.emit(RunEvent::ConditionStarted {
+            index,
+            total: conditions.len(),
+            id: condition.id.clone(),
+            items: jobs.len(),
+        });
+
         let (engine, backend) = match workspace
             .open_condition_engine(condition, matrix.run.strict_isolation, &tier.product())
             .await
@@ -244,7 +323,9 @@ pub(crate) async fn execute(
             Err(error) => {
                 let reason = format!("条件装配失败: {error}");
                 tracing::warn!(condition = %condition.id, error = %error, "评测条件装配失败");
-                state.warnings.push(format!("{}：{reason}", condition.id));
+                let message = format!("{}：{reason}", condition.id);
+                state.warnings.push(message.clone());
+                emit_warning(&control, &condition.id, &message);
                 let line = ConditionLine::from_manifest(
                     &tier.manifest,
                     &matrix.run.language,
@@ -262,6 +343,7 @@ pub(crate) async fn execute(
                 )?;
                 state.elapsed_ms = elapsed_ms(started);
                 state.save(&root)?;
+                emit_condition_done(&mut state, &control, &condition.id);
                 continue;
             }
         };
@@ -283,17 +365,21 @@ pub(crate) async fn execute(
                     let view = engine.index_status();
                     let status = view.status.as_str().to_string();
                     if status != "ready" && view.loaded != view.total {
-                        state.warnings.push(format!(
+                        let message = format!(
                             "条件 {} 索引未就绪: {}（{}/{}）",
                             condition.id, status, view.loaded, view.total
-                        ));
+                        );
+                        state.warnings.push(message.clone());
+                        emit_warning(&control, &condition.id, &message);
                     }
                     status
                 }
                 Err(error) => {
                     let reason = format!("索引重建失败: {error}");
                     tracing::warn!(condition = %condition.id, error = %error, "评测索引重建失败");
-                    state.warnings.push(format!("{}：{reason}", condition.id));
+                    let message = format!("{}：{reason}", condition.id);
+                    state.warnings.push(message.clone());
+                    emit_warning(&control, &condition.id, &message);
                     let line = ConditionLine::from_manifest(
                         &tier.manifest,
                         &matrix.run.language,
@@ -312,6 +398,7 @@ pub(crate) async fn execute(
                     close_engine(engine).await;
                     state.elapsed_ms = elapsed_ms(started);
                     state.save(&root)?;
+                    emit_condition_done(&mut state, &control, &condition.id);
                     continue;
                 }
             }
@@ -321,16 +408,6 @@ pub(crate) async fn execute(
         let effective_model = backend.model_text().to_string();
 
         let work_db = workspace.work_db(condition, matrix.run.strict_isolation);
-        // 待跑题目按原顺序编号：并发只改变执行时机，写出仍按这个序号收口。
-        let pending: Vec<&RunItem> = tier_items
-            .iter()
-            .copied()
-            .filter(|item| {
-                let key = (condition.id.clone(), item.row.question_id.clone());
-                !should_skip(&done, &attempts, &key, matrix.run.retry_limit)
-            })
-            .collect();
-        let jobs: Vec<(usize, &RunItem)> = pending.into_iter().enumerate().collect();
         {
             let run = ConditionRun {
                 engine: &engine,
@@ -348,17 +425,27 @@ pub(crate) async fn execute(
                 &mut attempts,
                 &mut state,
                 started,
+                &control,
             );
-            run_condition(&run, jobs, &mut oracle, &mut sink).await?;
+            run_condition(&run, jobs, &mut oracle, &mut sink, &control).await?;
         }
         close_engine(engine).await;
         state.elapsed_ms = elapsed_ms(started);
         state.save(&root)?;
+        emit_condition_done(&mut state, &control, &condition.id);
     }
 
     // ---- 收尾 ----
-    state.status = RunStatus::Completed;
     state.recount(&records_of(&state::scan_items(&items_path)?));
+    let unfinished = state
+        .conditions
+        .iter()
+        .any(|entry| entry.completed + entry.failed < entry.total);
+    state.status = if control.is_cancelled() && unfinished {
+        RunStatus::Aborted
+    } else {
+        RunStatus::Completed
+    };
     state.elapsed_ms = elapsed_ms(started);
     state.save(&root)?;
 
@@ -372,6 +459,7 @@ pub(crate) async fn execute(
         completed,
         failed,
         elapsed_ms: state.elapsed_ms,
+        status: state.status,
         warnings: state.warnings.clone(),
     })
 }
@@ -468,6 +556,31 @@ fn fail_condition(
         entry.failed = written;
     }
     Ok(())
+}
+
+// =========================================================
+// 进度事件
+// =========================================================
+
+/// 发出一条条件级提示事件（内容与 `run.json` 的告警一致）。
+fn emit_warning(control: &RunControl, condition_id: &str, message: &str) {
+    control.emit(RunEvent::Warning {
+        condition: Some(condition_id.to_string()),
+        message: message.to_string(),
+    });
+}
+
+/// 发出条件结束事件；计数取当前状态，条件级失败路径同样适用。
+fn emit_condition_done(state: &mut RunState, control: &RunControl, condition_id: &str) {
+    let (completed, failed) = state
+        .condition_mut(condition_id)
+        .map(|entry| (entry.completed, entry.failed))
+        .unwrap_or((0, 0));
+    control.emit(RunEvent::ConditionDone {
+        id: condition_id.to_string(),
+        completed,
+        failed,
+    });
 }
 
 // =========================================================

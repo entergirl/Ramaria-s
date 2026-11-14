@@ -3,9 +3,10 @@
 //! 设计特点:
 //! - 条件内按题并发：默认 4 路，环境变量可改，oracle-l1 恒串行
 //! - 顺序写出：乱序完成先入缓冲，序号连续才落盘，产物顺序与题集顺序一致
-//! - 写出点统一：追加产物、断点与条件计数、日志、批量存盘在同一处完成
+//! - 写出点统一：追加产物、断点与条件计数、日志、批量存盘与进度事件在同一处完成
+//! - 取消只在派题前检查：已在飞的题照常完成并写出，未派出的题不再启动
+//! - 计数按最后一行为准：重试成功后回退失败计数，同一题再次失败不重复累加
 //! - 并发只改变执行时机：单题上下文每题新建，条件级上下文只读共享
-//! - 并发度非法值回退默认；1 路时退化为逐题串行
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
@@ -18,6 +19,7 @@ use ramaria_service::Engine;
 
 use crate::measure::elapsed_ms;
 
+use super::control::{ItemEvent, RunControl, RunEvent};
 use super::exec::{ItemContext, ItemRun, execute_item};
 use super::item::{self, ConditionLine};
 use super::matrix::{Condition, Pipeline};
@@ -134,12 +136,17 @@ impl<T> Default for OrderedSink<T> {
 /// 参数:
 /// - `jobs`: `(序号, 输入)`，序号须从 0 起连续；
 /// - `concurrency`: 同时在飞的任务上限；
-/// - `execute`: 单任务执行器（每个任务调用一次）；
+/// - `execute`: 单任务执行器（每个任务调用一次）；返回 `None` 表示因取消未执行；
 /// - `write`: 写出回调，只在序号连续可达时逐条调用。
 ///
 /// 返回:
 /// - 全部结果写出后为 `Ok(())`；
 /// - 写出回调的错误原样返回（在飞任务随之丢弃）。
+///
+/// 说明:
+/// - 取消是单调的：未执行的任务只能出现在已启动任务的下一段，因此已执行结果
+///   始终是序号前缀，缓冲不会因缺号而卡住后续结果；
+/// - 未执行的任务不占序号，也不写出。
 async fn ordered_run<T, R, F, Fut, W>(
     jobs: Vec<(usize, T)>,
     concurrency: usize,
@@ -148,7 +155,7 @@ async fn ordered_run<T, R, F, Fut, W>(
 ) -> RamariaResult<()>
 where
     F: Fn(T) -> Fut,
-    Fut: Future<Output = R>,
+    Fut: Future<Output = Option<R>>,
     W: FnMut(R) -> RamariaResult<()>,
 {
     let mut sink = OrderedSink::new();
@@ -159,6 +166,9 @@ where
         })
         .buffer_unordered(concurrency.max(1));
     while let Some((seq, result)) = results.next().await {
+        let Some(result) = result else {
+            continue;
+        };
         sink.insert(seq, result);
         for result in sink.drain_ready() {
             write(result)?;
@@ -207,7 +217,8 @@ impl ConditionRun<'_> {
 /// - `done` / `attempts`: 断点集合，写出点按成功与否更新；
 /// - `state`: 运行状态（条件计数与批量落盘）；
 /// - `started`: 运行起点，批量落盘时回填累计耗时；
-/// - `processed`: 本条件已写出题数，控制落盘节奏。
+/// - `processed`: 本条件已写出题数，控制落盘节奏；
+/// - `control`: 取消开关与进度事件出口。
 pub(super) struct ItemSink<'a> {
     items_path: &'a Path,
     root: &'a Path,
@@ -217,10 +228,12 @@ pub(super) struct ItemSink<'a> {
     state: &'a mut RunState,
     started: Instant,
     processed: usize,
+    control: &'a RunControl,
 }
 
 impl<'a> ItemSink<'a> {
     /// 装配一个条件的写出上下文。
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         items_path: &'a Path,
         root: &'a Path,
@@ -229,6 +242,7 @@ impl<'a> ItemSink<'a> {
         attempts: &'a mut HashMap<(String, String), u32>,
         state: &'a mut RunState,
         started: Instant,
+        control: &'a RunControl,
     ) -> Self {
         Self {
             items_path,
@@ -239,10 +253,11 @@ impl<'a> ItemSink<'a> {
             state,
             started,
             processed: 0,
+            control,
         }
     }
 
-    /// 写出一道题的结果：追加产物，再更新断点、计数、日志与批量存盘。
+    /// 写出一道题的结果：追加产物，再更新断点、计数、日志、进度事件与批量存盘。
     ///
     /// 参数:
     /// - `run`: 单题执行结果。
@@ -250,6 +265,11 @@ impl<'a> ItemSink<'a> {
     /// 返回:
     /// - 写出成功为 `Ok(())`；
     /// - 产物追加或状态落盘失败返回对应错误。
+    ///
+    /// 说明:
+    /// - 成功时若该题此前留过失败行，先把条件失败数减一，再计完成；
+    /// - 失败时只有首次落行才累加失败数，同一题重试再失败不重复计数；
+    /// - 最终计数仍以收尾时的 `recount` 为准，这里只为运行中的界面保持准确。
     pub(super) fn write(&mut self, run: ItemRun) -> RamariaResult<()> {
         item::append(self.items_path, &run.record)?;
 
@@ -259,16 +279,34 @@ impl<'a> ItemSink<'a> {
         );
         if run.success {
             self.done.insert(key.clone());
-            self.attempts.remove(&key);
+            let retried = self.attempts.remove(&key).is_some();
             if let Some(entry) = self.state.condition_mut(self.condition_id) {
+                if retried {
+                    entry.failed = entry.failed.saturating_sub(1);
+                }
                 entry.completed += 1;
             }
-        } else {
-            self.attempts.insert(key, run.attempts);
+        } else if self.attempts.insert(key, run.attempts).is_none() {
             if let Some(entry) = self.state.condition_mut(self.condition_id) {
                 entry.failed += 1;
             }
         }
+        let (completed, failed, total) = self
+            .state
+            .condition_mut(self.condition_id)
+            .map(|entry| (entry.completed, entry.failed, entry.total))
+            .unwrap_or((0, 0, 0));
+        self.control.emit(RunEvent::ItemDone(ItemEvent {
+            condition_id: self.condition_id.to_string(),
+            question_id: run.record.question_id.clone(),
+            success: run.success,
+            elapsed_ms: run.record.elapsed_ms,
+            attempts: run.attempts,
+            error_kind: run.error_kind.map(str::to_string),
+            completed,
+            failed,
+            total,
+        }));
         tracing::info!(
             question = %run.record.question_id,
             condition = %self.condition_id,
@@ -293,7 +331,8 @@ impl<'a> ItemSink<'a> {
 /// - `run`: 条件级执行环境；
 /// - `jobs`: `(序号, 题目)`，序号即题目在本题集内的顺序；
 /// - `oracle`: 跨条件复用的压缩层索引缓存（仅 oracle-l1 使用）；
-/// - `sink`: 逐题写出上下文。
+/// - `sink`: 逐题写出上下文；
+/// - `control`: 取消开关；只在每题派发前检查，在飞题目照常完成。
 ///
 /// 返回:
 /// - 全部题目写出后为 `Ok(())`；
@@ -307,6 +346,7 @@ pub(super) async fn run_condition(
     jobs: Vec<(usize, &RunItem)>,
     oracle: &mut OracleCache,
     sink: &mut ItemSink<'_>,
+    control: &RunControl,
 ) -> RamariaResult<()> {
     let concurrency = concurrency_for(run.condition.pipeline);
     if concurrency <= 1 {
@@ -315,6 +355,9 @@ pub(super) async fn run_condition(
             _ => run.context(None),
         };
         for (_, item) in &jobs {
+            if control.is_cancelled() {
+                break;
+            }
             let outcome = execute_item(&mut context, item).await;
             sink.write(outcome)?;
         }
@@ -325,8 +368,11 @@ pub(super) async fn run_condition(
         jobs,
         concurrency,
         |item| async move {
+            if control.is_cancelled() {
+                return None;
+            }
             let mut context = run.context(None);
-            execute_item(&mut context, item).await
+            Some(execute_item(&mut context, item).await)
         },
         |outcome| sink.write(outcome),
     )

@@ -3,15 +3,17 @@
 //! 设计特点:
 //! - 断点判定覆盖五类输入：未跑、已完成、失败未超限、失败超限、无尝试记录
 //! - 计划计数按档位聚合，锁定条件只跑本题集档位
+//! - 无待跑题的条件只发结束事件：计数断言覆盖，装配跳过由代码审查覆盖
+//! - 报告摘要的收尾状态单独断言，确认中断不会渲染成完成
 //! - 运行根与矩阵提示为纯函数断言，不读写 `.eval/` 产物
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ramaria_core::error::RamariaError;
 
 use crate::baseline::QrelsRow;
-use crate::run::{AnswerModel, AnswerModelKind, Condition, Pipeline};
+use crate::run::{AnswerModel, AnswerModelKind, Condition, ConditionState, Pipeline, RunSection};
 
 use super::*;
 
@@ -188,4 +190,113 @@ async fn run_rejects_missing_matrix() {
     );
     assert!(error.to_string().contains("missing-matrix.toml"));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// =========================================================
+// 报告摘要
+// =========================================================
+
+/// 报告摘要带收尾状态：中断与完成可区分，计数行保持不变。
+#[test]
+fn report_render_shows_run_status() {
+    let report = RunReport {
+        run_id: "run-test".to_string(),
+        root: PathBuf::from(".eval/runs/run-test"),
+        total: 10,
+        completed: 7,
+        failed: 1,
+        elapsed_ms: 1234,
+        status: RunStatus::Aborted,
+        warnings: Vec::new(),
+    };
+    let aborted = report.render();
+    assert!(
+        aborted.contains("运行 run-test 结束"),
+        "标题应使用中性收尾词，实际:\n{aborted}"
+    );
+    assert!(
+        aborted.contains("状态: 中断"),
+        "中断运行应显示中断状态，实际:\n{aborted}"
+    );
+    assert!(
+        aborted.contains("完成 7 / 失败 1 / 计划 10"),
+        "计数行应保持不变，实际:\n{aborted}"
+    );
+
+    let completed = RunReport {
+        status: RunStatus::Completed,
+        ..report
+    };
+    assert!(
+        completed.render().contains("状态: 完成"),
+        "跑完的运行应显示完成状态"
+    );
+}
+
+// =========================================================
+// 无待跑题的条件
+// =========================================================
+
+/// 只有断点判定和状态两列的最小状态（不落盘）。
+fn state_with(condition: &str, total: usize, completed: usize, failed: usize) -> RunState {
+    RunState {
+        artifact_kind: "ramaria_eval_run".to_string(),
+        schema_version: 2,
+        run_id: "run-test".to_string(),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        updated_at: "2026-01-01T00:00:00Z".to_string(),
+        status: RunStatus::Running,
+        matrix: RunMatrix {
+            run: RunSection {
+                corpus: "lifebench".to_string(),
+                language: "zh".to_string(),
+                tiers: vec!["u1-m1".to_string()],
+                pipelines: vec![Pipeline::Layered],
+                budgets: vec![800],
+                question_limit: None,
+                question_sample: None,
+                strict_isolation: false,
+                retry_limit: 1,
+            },
+            answer_models: vec![AnswerModel {
+                kind: AnswerModelKind::Local,
+                base_url: "http://127.0.0.1:1234/v1".to_string(),
+                model: "local-model".to_string(),
+            }],
+            judge: None,
+        },
+        language: "zh".to_string(),
+        tiers: Vec::new(),
+        conditions: vec![ConditionState {
+            id: condition.to_string(),
+            total,
+            completed,
+            failed,
+        }],
+        elapsed_ms: 0,
+        warnings: Vec::new(),
+    }
+}
+
+/// 条件无待跑题时收口：ConditionDone 带的是状态里的当前计数。
+#[test]
+fn condition_done_event_carries_current_counts() {
+    let mut state = state_with("c1", 4, 3, 1);
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let control = RunControl::new(sender);
+
+    emit_condition_done(&mut state, &control, "c1");
+
+    match receiver.try_recv() {
+        Ok(RunEvent::ConditionDone {
+            id,
+            completed,
+            failed,
+        }) => {
+            assert_eq!(id, "c1");
+            assert_eq!(completed, 3, "完成数应取状态当前值");
+            assert_eq!(failed, 1, "失败数应取状态当前值");
+        }
+        _ => panic!("应收到 ConditionDone 事件"),
+    }
 }

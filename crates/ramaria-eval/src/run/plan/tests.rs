@@ -4,6 +4,7 @@
 //! - 档位夹具写真实 manifest.json 与 qa.jsonl，覆盖成功与三类校验失败
 //! - 题集保留不可回答题，顺序与文件一致
 //! - 全局上限跨档位累计，截断只发生在题目边界
+//! - 计划规模与题集同源：抽样与上限同时设置时仍与 `plan_items` 逐数一致
 //! - persona 标识与语料样本的同名函数逐一对比，锁定口径
 
 use std::path::{Path, PathBuf};
@@ -12,6 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ramaria_core::error::RamariaError;
 use serde_json::{Value, json};
 
+use crate::run::{AnswerModel, AnswerModelKind, Pipeline, RunSection};
+
+use super::super::sample::sample_tier;
 use super::*;
 
 // =========================================================
@@ -289,6 +293,94 @@ fn plan_items_persona_uid_matches_sample() {
         items[0].persona_uid,
         sample.persona_uid(),
         "题目枚举与语料的 persona 口径应一致"
+    );
+    cleanup(&dir);
+}
+
+// =========================================================
+// 计划规模
+// =========================================================
+
+/// 每档三题（三个分层），抽样 2 题后再按全局上限 3 题截断。
+fn counts_matrix() -> RunMatrix {
+    RunMatrix {
+        run: RunSection {
+            corpus: "lifebench".to_string(),
+            language: "zh".to_string(),
+            tiers: vec!["u1-m1".to_string(), "u1-q1".to_string()],
+            pipelines: vec![Pipeline::Layered, Pipeline::L1],
+            budgets: vec![800, 1600],
+            question_limit: Some(3),
+            question_sample: Some(2),
+            strict_isolation: false,
+            retry_limit: 1,
+        },
+        answer_models: vec![AnswerModel {
+            kind: AnswerModelKind::Local,
+            base_url: "http://127.0.0.1:1234/v1".to_string(),
+            model: "m".to_string(),
+        }],
+        judge: None,
+    }
+}
+
+/// 计划规模与题集同源：抽样取数、上限截断、条件数与条数公式一致。
+#[test]
+fn plan_counts_match_planned_items() {
+    let dir = temp_dir("counts");
+    let first = write_tier(
+        &dir,
+        "u1-m1",
+        &[
+            row("user-1", "q0", &["m1"]),
+            row("user-2", "q1", &["m2"]),
+            row("user-3", "q2", &["m3"]),
+        ],
+    );
+    let second = write_tier(
+        &dir,
+        "u1-q1",
+        &[
+            row("user-1", "q3", &["m4"]),
+            row("user-2", "q4", &["m5"]),
+            row("user-3", "q5", &["m6"]),
+        ],
+    );
+    let tiers = vec![
+        BaselineTier::load(&first).expect("首档应可加载"),
+        BaselineTier::load(&second).expect("次档应可加载"),
+    ];
+    let matrix = counts_matrix();
+
+    let counts = plan_counts(&matrix, &tiers);
+    assert_eq!(
+        counts.per_tier,
+        vec![("u1-m1".to_string(), 2), ("u1-q1".to_string(), 1)],
+        "每档先抽样再按全局上限截断"
+    );
+    assert_eq!(counts.questions, 3);
+    assert_eq!(
+        counts.conditions,
+        matrix.conditions().len(),
+        "条件数应与矩阵展开一致"
+    );
+    assert_eq!(counts.executions, 12, "计划条目为各档题数乘该档条件数");
+
+    // 与运行器口径逐数对比：同一份档位按抽样过滤后再枚举题目。
+    let mut sampled = tiers.clone();
+    for tier in &mut sampled {
+        let (indices, _) = sample_tier(&tier.manifest.tier.id, &tier.rows, 2);
+        let mut mask = vec![false; tier.rows.len()];
+        for index in indices {
+            mask[index] = true;
+        }
+        let mut cursor = mask.into_iter();
+        tier.rows.retain(|_| cursor.next().unwrap_or(false));
+    }
+    assert_eq!(
+        counts.questions,
+        plan_items(&sampled, matrix.run.question_limit).len(),
+        "计划题数应与 plan_items 一致"
     );
     cleanup(&dir);
 }
