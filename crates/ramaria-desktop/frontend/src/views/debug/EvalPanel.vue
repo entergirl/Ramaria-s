@@ -8,6 +8,7 @@
  * 设计特点:
  * - 全程只读：目录由原生对话框授权，选择动作本身即授权
  * - 摘要只取元信息、档位聚合分数与辅助指标；题面、参考答案与模型回复不渲染
+ * - 评测报告在档位得分之上先给结论行：编号、状态徽标与一句话
  * - 文件行以按钮承载，键盘可达；打开后由「返回文件列表」回到目录视图
  * - 目录未选择与目录为空共用空态，后者补一行说明
  */
@@ -16,7 +17,9 @@ import { computed } from 'vue'
 
 import type { EvalFile } from '../../core/api/dto'
 import { evalFileMeta, ratioLabel, scoreLabel } from '../../core/debug/format'
-import { ARTIFACT_KIND_LABELS } from '../../core/debug/probe'
+import { ARTIFACT_KIND_LABELS, HYPOTHESIS_STATUS_LABELS } from '../../core/debug/probe'
+import type { ArtifactAuxMetric } from '../../core/debug/probe'
+import BaseTag from '../../components/base/BaseTag.vue'
 import type { ArtifactView } from './useDebugView'
 import DebugStat from './DebugStat.vue'
 
@@ -46,6 +49,35 @@ const judgeLabel = computed(() => {
 })
 
 const personaLabel = computed(() => summary.value?.meta.personaUid ?? '未标注')
+
+const hypotheses = computed(() => summary.value?.hypotheses ?? [])
+
+const variantCountLabel = computed(() =>
+  summary.value?.kind === 'eval_report' ? '条件数' : '档位数',
+)
+
+const scoreBlockTitle = computed(() =>
+  summary.value?.kind === 'eval_report' ? '条件得分' : '档位得分',
+)
+
+/** 计数类辅助指标直接写数值，比例类转百分比 */
+function auxText(metric: ArtifactAuxMetric): string {
+  return metric.unit === 'count' ? String(metric.value) : ratioLabel(metric.value)
+}
+
+function hypothesisLabel(status: string): string {
+  return HYPOTHESIS_STATUS_LABELS[status] ?? (status === '' ? '未标注' : status)
+}
+
+function hypothesisTone(status: string): 'ok' | 'warn' | 'neutral' {
+  if (status === 'supported') {
+    return 'ok'
+  }
+  if (status === 'partial') {
+    return 'warn'
+  }
+  return 'neutral'
+}
 </script>
 
 <template>
@@ -65,25 +97,36 @@ const personaLabel = computed(() => summary.value?.meta.personaUid ?? '未标注
         <DebugStat label="产物类型" :value="kindLabel" />
         <DebugStat label="人格" :value="personaLabel" />
         <DebugStat label="语气判据" :value="judgeLabel" />
-        <DebugStat label="档位数" :value="summary.variants.length" />
+        <DebugStat :label="variantCountLabel" :value="summary.variants.length" />
       </div>
 
       <p v-if="!summary.hasContent" class="note">
         无法从该文件识别出评估结构，可能是其它 JSON 产物。
       </p>
 
+      <section v-if="hypotheses.length > 0" class="block">
+        <h3 class="block-title">结论</h3>
+        <ul class="hyps">
+          <li v-for="item in hypotheses" :key="item.id" class="hyp">
+            <span class="hyp-id">{{ item.id }}</span>
+            <BaseTag :tone="hypothesisTone(item.status)">{{ hypothesisLabel(item.status) }}</BaseTag>
+            <span class="hyp-summary">{{ item.summary }}</span>
+          </li>
+        </ul>
+      </section>
+
       <section v-if="summary.auxiliary" class="block">
         <h3 class="block-title">辅助指标</h3>
         <dl class="kv">
           <div v-for="metric in summary.auxiliary" :key="metric.label" class="kv-item">
             <dt class="kv-label">{{ metric.label }}</dt>
-            <dd class="kv-value">{{ ratioLabel(metric.value) }}</dd>
+            <dd class="kv-value">{{ auxText(metric) }}</dd>
           </div>
         </dl>
       </section>
 
       <section v-if="summary.variants.length > 0" class="block">
-        <h3 class="block-title">档位得分</h3>
+        <h3 class="block-title">{{ scoreBlockTitle }}</h3>
         <article v-for="variant in summary.variants" :key="variant.name" class="variant">
           <header class="variant-head">
             <code class="variant-name">{{ variant.name }}</code>
@@ -326,6 +369,38 @@ const personaLabel = computed(() => summary.value?.meta.personaUid ?? '未标注
   color: var(--text-1);
   font-family: var(--font-mono);
   font-size: var(--fs-code);
+}
+
+.hyps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.hyp {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-6) var(--space-8);
+}
+
+.hyp-id {
+  flex: none;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  font-weight: var(--fw-semibold);
+}
+
+.hyp-summary {
+  flex: 1 1 240px;
+  min-width: 0;
+  color: var(--text-1);
+  font-size: var(--fs-caption);
+  line-height: 1.6;
 }
 
 .variant {

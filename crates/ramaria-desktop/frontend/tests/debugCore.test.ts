@@ -21,7 +21,7 @@ import {
   ratioLabel,
   scoreLabel,
 } from '../src/core/debug/format'
-import { gateDescription, summarizeArtifact } from '../src/core/debug/probe'
+import { detectKind, gateDescription, summarizeArtifact } from '../src/core/debug/probe'
 
 function entry(keyword: string, status: string, useCount = 1): KeywordEntry {
   return {
@@ -75,6 +75,51 @@ function styleStats(raw = statsJson()): StyleStats {
     rule_text: '  多用短句，句尾常带语气词。  ',
     stats_json: raw,
     updated_at: 1_760_000_000_000,
+  }
+}
+
+/** 评测报告的裁剪夹具：只留摘要需要的字段 */
+function evalReportFixture() {
+  return {
+    artifact_kind: 'ramaria_eval_report',
+    schema_version: 1,
+    run_id: 'm9-c2',
+    source: {
+      items_sha256: 'abc',
+      ruleset_version: '2026-11-01.2',
+      score_schema_version: 3,
+      judge: { status: 'configured', model: 'judge-x', votes: 3 },
+    },
+    runs: [],
+    conditions: [
+      {
+        condition_id: 'u1-y1/flat-rag/800/0',
+        tier: 'u1-y1',
+        pipeline: 'flat-rag',
+        budget_chars: 800,
+        rubric: { micro_mean_ratio: 0.16316666666666668, micro_full_hit_rate: 0.15333333333333332 },
+        retrieval: {
+          message: { coverage_post: 0.59 },
+          artifact: { coverage_post: 0.5764221181037774 },
+        },
+      },
+      {
+        condition_id: 'u1-y1/layered/800/0',
+        pipeline: 'layered',
+        budget_chars: 800,
+        rubric: { micro_mean_ratio: 0.209 },
+        retrieval: { artifact: {} },
+      },
+    ],
+    comparisons: [
+      { id: 'u1-y1/layered-vs-flat-rag', significant: true },
+      { id: 'u5-y1/layered-vs-flat-rag', significant: false },
+    ],
+    hypotheses: [
+      { id: 'H1', status: 'supported', summary: 'layered 得分率随规模严格递减', evidence: ['均值 0.209'] },
+      { id: 'H2', status: 'not_evidenced', summary: '预算轴数据不足' },
+    ],
+    missing: [{ scope: 'report', kind: 'not_run', detail: '预算轴缺少条件' }],
   }
 }
 
@@ -199,6 +244,64 @@ describe('调试纯函数', () => {
     ])
   })
 
+  it('评测报告按条件行展开并带结论', () => {
+    const report = evalReportFixture()
+
+    expect(detectKind(report)).toBe('eval_report')
+    // 只有产物标识、没有数字 schema_version 时不认
+    expect(detectKind({ artifact_kind: 'ramaria_eval_report' })).toBe('unknown')
+
+    const summary = summarizeArtifact(report)
+    expect(summary.kind).toBe('eval_report')
+    expect(summary.meta.judgeUsed).toBe(true)
+    expect(summary.meta.personaUid).toBeNull()
+    expect(summary.meta.generatedAt).toBeNull()
+    expect(summary.variants).toHaveLength(2)
+    expect(summary.variants[0]?.name).toBe('u1-y1/flat-rag/800/0')
+    expect(summary.variants[0]?.ablation).toBeNull()
+    expect(summary.variants[0]?.gateText).toBe('flat-rag / 800 字符')
+    expect(summary.variants[0]?.scores.map((item) => item.label)).toEqual([
+      '得分率',
+      '覆盖(后)',
+      '全要点命中',
+    ])
+    expect(summary.variants[0]?.scores[1]?.value).toBeCloseTo(0.576)
+    // 缺值不塞 0：第二个条件只保留得分率
+    expect(summary.variants[1]?.scores).toEqual([{ label: '得分率', value: 0.209 }])
+
+    expect(summary.auxiliary).toEqual([
+      { label: '条件数', value: 2, unit: 'count' },
+      { label: '显著比较数', value: 1, unit: 'count' },
+      { label: '缺项数', value: 1, unit: 'count' },
+    ])
+    expect(summary.hypotheses?.map((item) => item.id)).toEqual(['H1', 'H2'])
+    expect(summary.hypotheses?.[0]).toEqual({
+      id: 'H1',
+      status: 'supported',
+      summary: 'layered 得分率随规模严格递减',
+    })
+    expect(summary.hasContent).toBe(true)
+  })
+
+  it('评测报告缺字段时降级为空态', () => {
+    const summary = summarizeArtifact({ artifact_kind: 'ramaria_eval_report', schema_version: 1 })
+    expect(summary.kind).toBe('eval_report')
+    expect(summary.variants).toEqual([])
+    expect(summary.hypotheses).toBeNull()
+    expect(summary.meta.judgeUsed).toBeNull()
+    expect(summary.auxiliary?.map((item) => item.value)).toEqual([0, 0, 0])
+    expect(summary.hasContent).toBe(false)
+
+    const skipped = summarizeArtifact({
+      artifact_kind: 'ramaria_eval_report',
+      schema_version: 1,
+      source: { judge: { status: 'skipped' } },
+      hypotheses: [{ id: 'H1', status: 'partial', summary: '仅条件成立' }],
+    })
+    expect(skipped.meta.judgeUsed).toBe(false)
+    // 条件为空但有结论，仍算有内容
+    expect(skipped.hasContent).toBe(true)
+  })
   it('畸形产物与未知档位安全降级', () => {
     const empty = summarizeArtifact(null)
     expect(empty.kind).toBe('unknown')

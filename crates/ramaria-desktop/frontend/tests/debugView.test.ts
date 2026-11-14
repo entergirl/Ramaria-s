@@ -34,6 +34,8 @@ interface DebugFixture {
   personas: PersonaSummary[]
   style: StyleStats | null
   files: EvalFile[]
+  /** read_eval_result 的返回内容；null 用默认的旧版产物 */
+  evalArtifact: unknown
   pickDir: string | null
   /** 非空时关键词请求挂起，直到用例放行（用于断言加载态） */
   keywordsGate: Promise<void> | null
@@ -118,6 +120,29 @@ function sampleFiles(): EvalFile[] {
   ]
 }
 
+/** 评测报告产物：条件两档、结论两条 */
+function sampleEvalReport() {
+  return {
+    artifact_kind: 'ramaria_eval_report',
+    schema_version: 1,
+    source: { judge: { status: 'configured' } },
+    conditions: [
+      {
+        condition_id: 'u1-y1/flat-rag/800/0',
+        pipeline: 'flat-rag',
+        budget_chars: 800,
+        rubric: { micro_mean_ratio: 0.16316666, micro_full_hit_rate: 0.1533 },
+        retrieval: { artifact: { coverage_post: 0.5764 } },
+      },
+    ],
+    comparisons: [{ id: 'u1-y1/layered-vs-flat-rag', significant: true }],
+    hypotheses: [
+      { id: 'H1', status: 'supported', summary: 'layered 得分率随规模严格递减' },
+      { id: 'H2', status: 'not_evidenced', summary: '预算轴数据不足' },
+    ],
+    missing: [{ scope: 'report', kind: 'not_run', detail: '预算轴缺少条件' }],
+  }
+}
 function makeRuntime(overrides: Partial<DebugFixture> = {}) {
   const calls: RecordedCall[] = []
   const fixture: DebugFixture = {
@@ -140,6 +165,7 @@ function makeRuntime(overrides: Partial<DebugFixture> = {}) {
     ],
     style: sampleStyle(),
     files: sampleFiles(),
+    evalArtifact: null,
     pickDir: 'C:/eval',
     keywordsGate: null,
     ...overrides,
@@ -180,14 +206,16 @@ function makeRuntime(overrides: Partial<DebugFixture> = {}) {
             return { dir: String(args.dir), total: fixture.files.length, files: fixture.files }
           }
           case 'read_eval_result':
-            return {
-              persona_uid: 'rama-0001',
-              judge_used: true,
-              embedding_used: false,
-              generated_at: '2026-09-01T00:00:00Z',
-              variants: [{ variant_id: 'B1', fact_score: 0.8, params: { ablation: 'B1' } }],
-              auxiliary: { evidence_traceability_rate: 0.9 },
-            }
+            return (
+              fixture.evalArtifact ?? {
+                persona_uid: 'rama-0001',
+                judge_used: true,
+                embedding_used: false,
+                generated_at: '2026-09-01T00:00:00Z',
+                variants: [{ variant_id: 'B1', fact_score: 0.8, params: { ablation: 'B1' } }],
+                auxiliary: { evidence_traceability_rate: 0.9 },
+              }
+            )
           default:
             throw new Error(`未预期的命令: ${command}`)
         }
@@ -393,6 +421,33 @@ describe('调试视图', () => {
     expect(wrapper.find('.score').text()).toContain('事实')
   })
 
+  it('打开评测报告时先渲染结论行', async () => {
+    const { wrapper } = await mountDebug('/debug/eval', {
+      overrides: { evalArtifact: sampleEvalReport() },
+    })
+
+    const picker = wrapper.findAll('button').find((item) => item.text() === '选择目录')
+    await picker?.trigger('click')
+    await flushPromises()
+    await wrapper.find('.file-row').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('评测报告')
+    expect(wrapper.findAll('.block-title').map((item) => item.text())).toEqual([
+      '结论',
+      '辅助指标',
+      '条件得分',
+    ])
+    const rows = wrapper.findAll('.hyp')
+    expect(rows).toHaveLength(2)
+    expect(rows[0]?.text()).toContain('H1')
+    expect(rows[0]?.text()).toContain('支持')
+    expect(rows[0]?.text()).toContain('layered 得分率随规模严格递减')
+    expect(rows[1]?.text()).toContain('未取证')
+    // 计数型辅助指标直接显示数值
+    expect(wrapper.text()).toContain('显著比较数')
+    expect(wrapper.text()).toContain('得分率')
+  })
   it('评估目录不可读时显示降级条并清空列表', async () => {
     const { wrapper } = await mountDebug('/debug/eval', {
       evalDir: 'C:/eval',
